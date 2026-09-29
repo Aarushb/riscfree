@@ -24,3 +24,12 @@ AsAccess aims for drop-in compatibility with RARS course material: same memory m
 12. **MMIO keyboard via GUI input line.** The MMIO receiver port is fed by the Run I/O input line (or CLI stdin, where non-blocking polling is documented as unavailable). RARS feeds it from its dedicated Keyboard/Display tool window.
 13. **Interrupt-enable bits are storage only** until trap delivery lands: writing the receiver/transmitter interrupt-enable bits has no effect yet; polled MMIO works fully.
 14. **`peek` semantics for the memory view**: unmapped addresses read as zeros in the Memory tab (matching machine read semantics), and the MMIO window reads as its live device registers.
+
+## Interrupts and traps
+
+15. **Interrupt enable gating**: a device interrupt fires when the device's own interrupt-enable bit is set AND user interrupt enable (`ustatus.UIE`) is on. A request raised while gated stays pending and fires when enables allow.
+16. **Transmitter interrupt is edge-triggered**: RARS fires the display interrupt when the transmitter becomes ready; ours is always ready, so the 0-to-1 transition of the enable bit latches exactly one interrupt, re-armed only by disabling and re-enabling.
+17. **Priority within the external class**: pending external interrupts deliver lowest-cause-first as a deterministic stand-in for RARS's unspecified device-registration order (keyboard 0x40 before display 0x80).
+18. **`wfi` waits on our event model**: with nothing pending it parks and the run loop services host keyboard input and armed timers; virtual time fast-forwards to the next timer tick rather than wall-clock waiting.
+19. **Synchronous exceptions vector only when a handler is configured** (`utvec != 0`); otherwise they halt with an error like RARS without an exception handler. Breakpoints fire on trap-handler entry, which RARS does not do (their issue: PR #225 unmerged).
+20. **CSR `time` reads the instruction clock**, not wall time; the syscall-30 wall-clock read is unchanged.
