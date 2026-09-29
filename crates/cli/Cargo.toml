@@ -1,0 +1,9 @@
+[package]
+name = "asaccess-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+rvasm = { workspace = true }
+rvm = { workspace = true }

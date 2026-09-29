@@ -3,6 +3,7 @@ AGENT-CORE-DIRECTIVES.MD
 
 # Rust
 /target
+/target-spike
 **/*.rs.bk
 
 # Profiling data

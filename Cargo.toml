@@ -1,0 +1,26 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/rvasm",
+    "crates/rvm",
+    "crates/narration",
+    "crates/speech",
+    "crates/cli",
+    "crates/app",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["Aarush Bhat"]
+
+[workspace.dependencies]
+rvasm = { path = "crates/rvasm" }
+rvm = { path = "crates/rvm" }
+narration = { path = "crates/narration" }
+speech = { path = "crates/speech" }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
