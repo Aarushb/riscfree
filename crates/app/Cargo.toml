@@ -9,3 +9,4 @@ rvasm = { workspace = true }
 rvm = { workspace = true }
 narration = { workspace = true }
 speech = { workspace = true }
+wxdragon = { version = "0.9.22", features = ["stc"] }
