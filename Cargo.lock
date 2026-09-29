@@ -21,6 +21,10 @@ dependencies = [
 name = "asaccess"
 version = "0.1.0"
 dependencies = [
+ "narration",
+ "rvasm",
+ "rvm",
+ "speech",
  "wxdragon",
 ]
 
