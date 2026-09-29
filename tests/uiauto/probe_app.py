@@ -51,7 +51,9 @@ from comtypes.gen.UIAutomationClient import (  # noqa: E402
 )
 
 REPO = Path(__file__).resolve().parents[2]
-EXE = REPO / "target-spike" / "debug" / "asaccess.exe"
+# The binary under test can be passed as argv[1]; the spike build is the
+# historical default.
+EXE = Path(sys.argv[1]) if len(sys.argv) > 1 else REPO / "target-spike" / "debug" / "asaccess.exe"
 OUT = Path(__file__).resolve().parent / "uia_dump.txt"
 SLOG = Path(__file__).resolve().parent / "probe_steps.log"
 _slog = SLOG.open("w", encoding="utf-8")

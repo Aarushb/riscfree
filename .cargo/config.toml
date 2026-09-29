@@ -1,0 +1,11 @@
+# Workspace-scoped build environment for the native dependencies.
+# `relative = true` anchors each path at the workspace root regardless of
+# where cargo is invoked. See docs/BUILDING.md for the full setup
+# (prism build, uv venv).
+
+[env]
+LIBCLANG_PATH = { value = "tests/uiauto/.venv/Lib/site-packages/clang/native", relative = true }
+PRISM_LIB_DIR = { value = "target/prism-install/lib", relative = true }
+# Absolute because cmake.exe ships outside the workspace with Visual Studio.
+# On another machine, point this at your VS Build Tools cmake (see docs/BUILDING.md).
+CMAKE = "C:\\Program Files (x86)\\Microsoft Visual Studio\\18\\BuildTools\\Common7\\IDE\\CommonExtensions\\Microsoft\\CMake\\CMake\\bin\\cmake.exe"

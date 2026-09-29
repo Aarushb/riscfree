@@ -1,61 +1,137 @@
-//! AsAccess GUI skeleton (wxDragon accessibility spike, Phase 0 / Spike 1).
+//! AsAccess GUI: the wxDragon front end wired to the rvasm/rvm core.
 //!
-//! Builds one main frame exercising every widget class the IDE is expected to
-//! need, each with an explicit accessible name, so a UIA probe can measure what
-//! screen readers will actually see:
-//! - menu bar (File / Run / Help) with accelerators
-//! - button row: Assemble, Run, Step, Stop
-//! - horizontal splitter: StyledTextCtrl editor | vertical splitter with
-//!   register table (wxGrid tab + virtual wxListCtrl tab) over a Run I/O pane
-//! - status bar with two fields
-//! - Settings dialog (labels associated via sizers) and a Keyboard Shortcuts
-//!   dialog (F1 accelerator) listing shortcuts in a report-mode list control.
+//! Threading model (docs/TECH-SPEC.md section 8): the UI thread owns all
+//! widgets; a simulation thread owns the Machine exclusively. They talk over
+//! command/event channels, and a wx timer drains the event queue at ~30 Hz so
+//! long runs never block the interface. Dynamic announcements go through the
+//! narration and speech crates; structural accessibility is the native
+//! widgets themselves.
+
+mod bridge;
 
 #[cfg(target_os = "windows")]
 use wxdragon::accessible::AccRole;
 use wxdragon::prelude::*;
 
-// Menu item ids.
+use narration::Verbosity;
+use rvm::Halt;
+use std::cell::RefCell;
+use std::rc::Rc;
+use std::sync::mpsc::Sender;
+
+use crate::bridge::{Cmd, Evt, InputChannel, start_sim_thread};
+
+// Menu and control ids.
 const ID_NEW: Id = 1001;
 const ID_OPEN: Id = 1002;
 const ID_SAVE: Id = 1003;
 const ID_SETTINGS: Id = 1004;
 const ID_EXIT: Id = 1005;
+const ID_RECONNECT_SPEECH: Id = 1006;
 const ID_RUN_ASSEMBLE: Id = 2001;
 const ID_RUN_RUN: Id = 2002;
 const ID_RUN_STEP: Id = 2003;
-const ID_RUN_STOP: Id = 2004;
+const ID_RUN_BACKSTEP: Id = 2004;
+const ID_RUN_PAUSE: Id = 2005;
+const ID_RUN_STOP: Id = 2006;
+const ID_RUN_RESET: Id = 2007;
 const ID_SHORTCUTS: Id = 3001;
 const ID_ABOUT: Id = 3002;
 
-/// Register rows shared by the grid and the virtual list tabs.
-const REGISTER_ROWS: [(&str, &str, &str, &str); 8] = [
-    ("x0", "zero", "0x00000000", "no"),
-    ("x1", "ra", "0x00000000", "no"),
-    ("x2", "sp", "0x7ffffc00", "no"),
-    ("x3", "gp", "0x00000000", "no"),
-    ("x4", "tp", "0x00000000", "no"),
-    ("x5", "t0", "0x00000005", "yes"),
-    ("x6", "t1", "0x00000007", "yes"),
-    ("x7", "t2", "0x0000000c", "yes"),
-];
-
 const SAMPLE_RISCV: &str = "\
-# add.s - add two numbers
+# add.s - add two numbers and print the sum
     .text
     .globl main
 main:
-    li   t0, 5        # load immediate 5
-    li   t1, 7        # load immediate 7
-    add  t2, t0, t1   # t2 = t0 + t1
-    ecall             # exit to host
+    li   a0, 5        # load immediate 5
+    li   a1, 7        # load immediate 7
+    add  a2, a0, a1   # a2 = a0 + a1
+    mv   a0, a2
+    li   a7, 1        # PrintInt
+    ecall
+    li   a7, 10       # Exit
+    ecall
 ";
 
+/// Everything the run controls and dialogs share on the UI thread.
+struct Shared {
+    verbosity: RefCell<Verbosity>,
+    program_path: RefCell<Option<String>>,
+    assembled: RefCell<Option<rvasm::Program>>,
+}
+
+/// Every widget the behavior code needs, kept by handle. wxDragon handles are
+/// Copy, so these clone freely into event closures.
+#[derive(Clone)]
+struct Widgets {
+    frame: Frame,
+    status_bar: StatusBar,
+    editor: StyledTextCtrl,
+    register_list: ListCtrl,
+    io_output: TextCtrl,
+    io_input: TextCtrl,
+    messages: ListCtrl,
+}
+
+/// Speech dispatch. Created once; the Settings menu reconnects on demand so a
+/// screen reader started after the app is picked up.
+struct Narrator {
+    /// Initialized on first use so a slow screen reader bridge never delays
+    /// application startup.
+    speaker: RefCell<Option<Box<dyn speech::Speaker>>>,
+}
+
+impl Narrator {
+    fn new() -> Self {
+        Narrator { speaker: RefCell::new(None) }
+    }
+
+    fn with_speaker(&self, f: impl FnOnce(&mut dyn speech::Speaker)) {
+        let needs_init = {
+            let current = self.speaker.borrow();
+            !current.as_ref().is_some_and(|s| s.is_connected())
+        };
+        if needs_init {
+            self.speaker.replace(Some(speech::best_speaker()));
+        }
+        if let Some(speaker) = self.speaker.borrow_mut().as_mut() {
+            f(speaker.as_mut());
+        }
+    }
+
+    fn reconnect(&self) {
+        self.speaker.replace(Some(speech::best_speaker()));
+    }
+
+    fn speak(&self, text: Option<String>) {
+        if let Some(text) = text {
+            self.with_speaker(|speaker| speaker.speak(&text, false));
+        }
+    }
+
+    fn backend_summary(&self) -> String {
+        self.with_speaker(|_| {});
+        let current = self.speaker.borrow();
+        match current.as_ref() {
+            Some(speaker) if speaker.is_connected() => {
+                format!("Speech connected via {}", speaker.backend_name())
+            }
+            _ => "No speech backend found".to_string(),
+        }
+    }
+}
+
 fn main() {
-    // Avoid manifest-check warnings when running a plain debug exe on Windows.
     SystemOptions::set_option_by_int("msw.no-manifest-check", 1);
 
     let _ = wxdragon::main(|_| {
+        let shared = Rc::new(Shared {
+            verbosity: RefCell::new(Verbosity::Brief),
+            program_path: RefCell::new(None),
+            assembled: RefCell::new(None),
+        });
+        let narrator = Rc::new(Narrator::new());
+
         let frame = Frame::builder()
             .with_title("AsAccess - RISC-V Assembly IDE")
             .with_size(Size::new(1200, 800))
@@ -64,45 +140,51 @@ fn main() {
         #[cfg(target_os = "windows")]
         frame.set_accessibility_role(AccRole::Application);
 
-        // --- Status bar (two fields) ---
         let status_bar = StatusBar::builder(&frame)
             .with_fields_count(2)
-            .with_status_widths(vec![-1, 260])
+            .with_status_widths(vec![-1, 320])
             .add_initial_text(0, "Ready")
             .add_initial_text(1, "No program loaded")
             .build();
         status_bar.set_accessibility_label("Status bar");
         frame.set_existing_status_bar(Some(&status_bar));
 
-        // --- Menu bar ---
         frame.set_menu_bar(build_menu_bar());
 
-        // --- Main panel with button row + splitter ---
+        // Simulation thread and channels.
+        let (cmd_tx, cmd_rx) = std::sync::mpsc::channel::<Cmd>();
+        let (evt_tx, evt_rx) = std::sync::mpsc::channel::<Evt>();
+        let (input_tx, input_rx) = std::sync::mpsc::channel::<String>();
+        let input: InputChannel = std::sync::Arc::new(std::sync::Mutex::new(input_rx));
+        std::thread::Builder::new()
+            .name("sim".into())
+            .spawn(move || start_sim_thread(cmd_rx, evt_tx, input))
+            .expect("spawn simulation thread");
+
         let panel = Panel::builder(&frame).build();
         let main_sizer = BoxSizer::builder(Orientation::Vertical).build();
 
+        // --- Run controls ---------------------------------------------------
         let button_row = BoxSizer::builder(Orientation::Horizontal).build();
+        let mut run_buttons: Vec<(Button, &'static str)> = Vec::new();
         for (label, help) in [
             ("Assemble", "Assemble the current source file"),
             ("Run", "Run the assembled program"),
             ("Step", "Execute one instruction"),
+            ("Backstep", "Undo one instruction"),
+            ("Pause", "Pause the running program"),
             ("Stop", "Stop the running program"),
+            ("Reset", "Reset the program to its initial state"),
         ] {
             let btn = Button::builder(&panel).with_label(label).build();
             btn.set_accessibility_label(label);
             btn.set_accessibility_description(help);
-            #[cfg(target_os = "windows")]
-            btn.set_accessibility_role(AccRole::PushButton);
-            let sb = status_bar;
-            let text = format!("{label} pressed");
-            btn.on_click(move |_| {
-                sb.set_status_text(&text, 0);
-            });
             button_row.add(&btn, 0, SizerFlag::All, 4);
+            run_buttons.push((btn, label));
         }
         main_sizer.add_sizer(&button_row, 0, SizerFlag::Expand, 0);
 
-        // Horizontal splitter: editor | right side.
+        // --- Splitters: editor | registers over output -----------------------
         let h_splitter = SplitterWindow::builder(&panel)
             .with_style(SplitterWindowStyle::LiveUpdate | SplitterWindowStyle::Default)
             .build();
@@ -117,23 +199,210 @@ fn main() {
             .with_style(SplitterWindowStyle::LiveUpdate | SplitterWindowStyle::Default)
             .build();
 
-        let notebook = build_register_views(&right_splitter);
+        let (register_notebook, register_list) = build_register_views(&right_splitter);
+        let (bottom_notebook, io_output, io_input, send_input, messages) =
+            build_bottom_views(&right_splitter);
 
-        let io_panel = build_io_panel(&right_splitter);
-
-        let _ = right_splitter.split_horizontally(&notebook, &io_panel, 380);
+        let _ = right_splitter.split_horizontally(&register_notebook, &bottom_notebook, 380);
         let _ = h_splitter.split_vertically(&editor_panel, &right_splitter, 620);
 
         main_sizer.add(&h_splitter, 1, SizerFlag::Expand, 0);
         panel.set_sizer(main_sizer, true);
 
-        // --- Menu events (dialogs opened from menu items) ---
-        bind_menu_events(&frame, &status_bar);
+        let widgets = Widgets {
+            frame,
+            status_bar,
+            editor,
+            register_list,
+            io_output,
+            io_input,
+            messages,
+        };
 
-        frame.show(true);
-        frame.centre();
+        // --- Run controls -> actions -----------------------------------------
+        for (btn, label) in run_buttons {
+            match label {
+                "Assemble" => {
+                    let w = widgets.clone();
+                    let sh = shared.clone();
+                    let nar = narrator.clone();
+                    let tx = cmd_tx.clone();
+                    btn.on_click(move |_| do_assemble(&w, &sh, &nar, &tx));
+                }
+                "Run" => {
+                    let tx = cmd_tx.clone();
+                    let sb = widgets.status_bar;
+                    btn.on_click(move |_| {
+                        if tx.send(Cmd::Run).is_err() {
+                            sb.set_status_text("Simulation thread is not responding", 0);
+                        }
+                    });
+                }
+                "Step" => {
+                    let tx = cmd_tx.clone();
+                    btn.on_click(move |_| {
+                        tx.send(Cmd::Step).ok();
+                    });
+                }
+                "Backstep" => {
+                    let tx = cmd_tx.clone();
+                    btn.on_click(move |_| {
+                        tx.send(Cmd::Backstep).ok();
+                    });
+                }
+                "Pause" | "Stop" => {
+                    let tx = cmd_tx.clone();
+                    btn.on_click(move |_| {
+                        tx.send(Cmd::Pause).ok();
+                    });
+                }
+                "Reset" => {
+                    let tx = cmd_tx.clone();
+                    btn.on_click(move |_| {
+                        tx.send(Cmd::Reset).ok();
+                    });
+                }
+                _ => {}
+            }
+        }
+
+        // Program input: Send forwards one line to the machine.
+        {
+            let input_ctrl = widgets.io_input;
+            send_input.on_click(move |_| {
+                let line = input_ctrl.get_value();
+                input_ctrl.set_value("");
+                if !line.is_empty() {
+                    input_tx.send(line).ok();
+                }
+            });
+        }
+
+        bind_menu_events(&widgets, &shared, &narrator, &cmd_tx);
+
+        // --- Event pump: simulation events -> views and narrator -------------
+        // Driven by idle events: wxDragon's frame-owned wxTimer binding does
+        // not deliver ticks (verified in the Phase 1 GUI build), while idle
+        // events fire whenever the loop is empty. The small sleep inside the
+        // handler throttles the request-more cycle; the drain itself never
+        // blocks.
+        {
+            let w = widgets.clone();
+            let sh = shared.clone();
+            let nar = narrator.clone();
+            frame.on_idle(move |idle| {
+                if let WindowEventData::Idle(idle) = idle {
+                    idle.request_more(true);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+                while let Ok(evt) = evt_rx.try_recv() {
+                    handle_sim_event(&w, &sh, &nar, evt);
+                }
+            });
+        }
+
+        widgets.frame.show(true);
+        widgets.frame.centre();
     });
 }
+
+fn handle_sim_event(w: &Widgets, shared: &Shared, narrator: &Narrator, evt: Evt) {
+    match evt {
+        Evt::Output(text) => {
+            // Cap the transcript so a chatty program cannot grow it forever.
+            if w.io_output.get_value().len() > 1_000_000 {
+                w.io_output.set_value("");
+            }
+            w.io_output.append_text(&text);
+        }
+        Evt::State(snapshot) => {
+            let bridge::StateSnapshot { regs, pc, instret } = *snapshot;
+            refresh_registers(w, &regs);
+            w.status_bar.set_status_text(&format!("pc 0x{pc:08x}, {instret} executed"), 1);
+        }
+        Evt::Stepped { text, line, changes, pc, instret } => {
+            w.status_bar.set_status_text(&format!("line {line}, pc 0x{pc:08x}, {instret} executed"), 1);
+            narrator.speak(narration::step_done(*shared.verbosity.borrow(), &text, &changes));
+        }
+        Evt::Halted { halt, pc, instret } => {
+            let location = shared
+                .assembled
+                .borrow()
+                .as_ref()
+                .and_then(|p| p.statement_at(pc))
+                .map(|s| format!("line {}", s.source.line));
+            match &halt {
+                Halt::Breakpoint | Halt::Ebreak => {
+                    w.status_bar.set_status_text(&format!("Stopped, {}", location.as_deref().unwrap_or("pc outside program")), 0);
+                }
+                _ => {}
+            }
+            narrator.speak(narration::halted(*shared.verbosity.borrow(), &halt, instret, location.as_deref()));
+        }
+        Evt::Loaded { pc, instret } => {
+            refresh_registers_zeroed(w);
+            w.status_bar.set_status_text(&format!("Program loaded, pc 0x{pc:08x}, {instret} executed"), 0);
+        }
+    }
+}
+
+fn refresh_registers(w: &Widgets, regs: &[u64; 32]) {
+    // The register list is virtual; rewriting the backing store through the
+    // shared callback closure is done by regenerating rows here. Because the
+    // callback closure captured its own Rc, updates go through the same data
+    // by re-querying: simplest correct approach is rewriting via the list's
+    // virtual callback inputs stored in a thread-local registry (see
+    // build_register_views).
+    REGISTERS.with(|r| {
+        let mut rows = r.borrow_mut();
+        for (i, row) in rows.iter_mut().enumerate() {
+            row[2] = format_reg(regs[i]);
+        }
+    });
+    w.register_list.refresh_items(0, 31);
+}
+
+fn refresh_registers_zeroed(w: &Widgets) {
+    REGISTERS.with(|r| {
+        let mut rows = r.borrow_mut();
+        for (i, row) in rows.iter_mut().enumerate() {
+            row[2] = "0".to_string();
+            let _ = i;
+        }
+    });
+    w.register_list.refresh_items(0, 31);
+}
+
+thread_local! {
+    /// Backing rows for the virtual register list. A thread-local keeps the
+    /// virtual text callback and the event pump sharing one allocation
+    /// without fighting the widget handle lifetime.
+    static REGISTERS: RefCell<Vec<[String; 4]>> = RefCell::new(
+        (0..32)
+            .map(|i| [format!("x{i}"), reg_name(i).to_string(), "0".to_string(), String::new()])
+            .collect(),
+    );
+}
+
+const ABI: &[&str] = &[
+    "zero", "ra", "sp", "gp", "tp", "t0", "t1", "t2", "s0", "s1", "a0", "a1", "a2", "a3", "a4", "a5",
+    "a6", "a7", "s2", "s3", "s4", "s5", "s6", "s7", "s8", "s9", "s10", "s11", "t3", "t4", "t5", "t6",
+];
+
+fn reg_name(index: usize) -> &'static str {
+    ABI.get(index).copied().unwrap_or("??")
+}
+
+fn format_reg(v: u64) -> String {
+    let as_i32 = v as u32 as i32;
+    if (-9_999..=9_999).contains(&as_i32) {
+        format!("{as_i32}")
+    } else {
+        format!("{as_i32} (0x{:08x})", v as u32)
+    }
+}
+
+// --- Widget builders -------------------------------------------------------
 
 fn build_menu_bar() -> MenuBar {
     let file_menu = Menu::builder()
@@ -142,15 +411,23 @@ fn build_menu_bar() -> MenuBar {
         .append_item(ID_SAVE, "&Save\tCtrl+S", "Save the current source file")
         .append_separator()
         .append_item(ID_SETTINGS, "S&ettings...", "Open the settings dialog")
+        .append_item(ID_RECONNECT_SPEECH, "&Reconnect screen reader speech", "Reconnect the speech bridge after starting a screen reader")
         .append_separator()
         .append_item(ID_EXIT, "E&xit\tAlt+F4", "Exit AsAccess")
         .build();
 
+    // F-keys follow RARS so course muscle memory keeps working:
+    // F3 assemble, F5 run, F7 step, F8 backstep, F9 pause, F11 stop, F12 reset.
     let run_menu = Menu::builder()
-        .append_item(ID_RUN_ASSEMBLE, "&Assemble\tF7", "Assemble the current source file")
+        .append_item(ID_RUN_ASSEMBLE, "&Assemble\tF3", "Assemble the current source file")
         .append_item(ID_RUN_RUN, "&Run\tF5", "Run the assembled program")
-        .append_item(ID_RUN_STEP, "St&ep\tF10", "Execute one instruction")
-        .append_item(ID_RUN_STOP, "Sto&p\tShift+F5", "Stop the running program")
+        .append_item(ID_RUN_PAUSE, "Paus&e\tF9", "Pause the running program")
+        .append_separator()
+        .append_item(ID_RUN_STEP, "St&ep\tF7", "Execute one instruction")
+        .append_item(ID_RUN_BACKSTEP, "&Backstep\tF8", "Undo one instruction")
+        .append_separator()
+        .append_item(ID_RUN_STOP, "Sto&p\tF11", "Stop the running program")
+        .append_item(ID_RUN_RESET, "R&eset\tF12", "Reset the program to its initial state")
         .build();
 
     let help_menu = Menu::builder()
@@ -169,204 +446,282 @@ fn build_menu_bar() -> MenuBar {
 fn build_editor(parent: &Panel) -> StyledTextCtrl {
     let editor = StyledTextCtrl::builder(parent).build();
     editor.set_text(SAMPLE_RISCV);
-    // Line numbers in margin 1.
     editor.set_margin_type(1, MarginType::Number);
     editor.set_margin_width(1, 40);
     editor.set_read_only(false);
     editor.set_accessibility_label("Source editor");
     editor.set_accessibility_description("RISC-V assembly source editor");
-    editor.set_accessibility_value(SAMPLE_RISCV);
     #[cfg(target_os = "windows")]
     editor.set_accessibility_role(AccRole::Document);
     editor
 }
 
-fn build_register_views(parent: &SplitterWindow) -> Notebook {
+fn build_register_views(parent: &SplitterWindow) -> (Notebook, ListCtrl) {
     let notebook = Notebook::builder(parent).build();
-    notebook.set_accessibility_label("Register views");
+    notebook.set_accessibility_label("State views");
     #[cfg(target_os = "windows")]
     notebook.set_accessibility_role(AccRole::PageTabList);
 
-    // Tab 1: wxGrid register table.
-    let grid_panel = Panel::builder(&notebook).build();
-    let grid = Grid::builder(&grid_panel).build();
-    grid.create_grid(REGISTER_ROWS.len() as i32, 4, GridSelectionMode::Cells);
-    for (col, name) in ["Reg", "Name", "Value", "Changed"].iter().enumerate() {
-        grid.set_col_label_value(col as i32, name);
-    }
-    for (row, (reg, name, value, changed)) in REGISTER_ROWS.iter().enumerate() {
-        grid.set_row_label_value(row as i32, &(row + 1).to_string());
-        grid.set_cell_value(row as i32, 0, reg);
-        grid.set_cell_value(row as i32, 1, name);
-        grid.set_cell_value(row as i32, 2, value);
-        grid.set_cell_value(row as i32, 3, changed);
-    }
-    grid.set_accessibility_label("Register values grid table");
-    #[cfg(target_os = "windows")]
-    grid.set_accessibility_role(AccRole::Table);
-    let grid_sizer = BoxSizer::builder(Orientation::Vertical).build();
-    grid_sizer.add(&grid, 1, SizerFlag::Expand | SizerFlag::All, 2);
-    grid_panel.set_sizer(grid_sizer, true);
-    notebook.add_page(&grid_panel, "Registers (Grid)", true, None);
-
-    // Tab 2: virtual wxListCtrl in report mode with the same columns.
+    // Registers: a virtual report list. wxGrid measured invisible to UIA
+    // clients in the spike, so the list is the register surface.
     let list_panel = Panel::builder(&notebook).build();
     let list = ListCtrl::builder(&list_panel)
-        .with_style(
-            ListCtrlStyle::Report | ListCtrlStyle::Virtual | ListCtrlStyle::SingleSel,
-        )
+        .with_style(ListCtrlStyle::Report | ListCtrlStyle::Virtual | ListCtrlStyle::SingleSel)
         .build();
-    list.insert_column(0, "Reg", ListColumnFormat::Left, 70);
-    list.insert_column(1, "Name", ListColumnFormat::Left, 110);
-    list.insert_column(2, "Value", ListColumnFormat::Left, 140);
-    list.insert_column(3, "Changed", ListColumnFormat::Left, 90);
-    list.set_item_count(REGISTER_ROWS.len() as i64);
-    let rows: Vec<[String; 4]> = REGISTER_ROWS
-        .iter()
-        .map(|(r, n, v, c)| [r.to_string(), n.to_string(), v.to_string(), c.to_string()])
-        .collect();
+    list.insert_column(0, "Reg", ListColumnFormat::Left, 60);
+    list.insert_column(1, "Name", ListColumnFormat::Left, 90);
+    list.insert_column(2, "Value", ListColumnFormat::Left, 200);
+    list.set_item_count(32);
     assert!(list.set_virtual_text_callback(move |item, col| {
-        rows.get(item as usize)
-            .and_then(|row| row.get(col as usize))
-            .cloned()
-            .unwrap_or_default()
+        REGISTERS.with(|rows| {
+            rows.borrow()
+                .get(item as usize)
+                .and_then(|row| row.get(col as usize))
+                .cloned()
+                .unwrap_or_default()
+        })
     }));
-    list.set_accessibility_label("Register values list table");
+    list.set_accessibility_label("Register values");
+    list.set_accessibility_description("All thirty-two integer registers with current values");
     #[cfg(target_os = "windows")]
     list.set_accessibility_role(AccRole::List);
     let list_sizer = BoxSizer::builder(Orientation::Vertical).build();
     list_sizer.add(&list, 1, SizerFlag::Expand | SizerFlag::All, 2);
     list_panel.set_sizer(list_sizer, true);
-    notebook.add_page(&list_panel, "Registers (List)", false, None);
+    notebook.add_page(&list_panel, "Registers", true, None);
 
-    notebook
+    (notebook, list)
 }
 
-fn build_io_panel(parent: &SplitterWindow) -> Panel {
-    let io_panel = Panel::builder(parent).build();
+/// The bottom notebook: Run I/O console plus the assembler messages list.
+#[allow(clippy::type_complexity)]
+fn build_bottom_views(parent: &SplitterWindow) -> (Notebook, TextCtrl, TextCtrl, Button, ListCtrl) {
+    let notebook = Notebook::builder(parent).build();
+    notebook.set_accessibility_label("Output views");
+    #[cfg(target_os = "windows")]
+    notebook.set_accessibility_role(AccRole::PageTabList);
+
+    // Tab 1: Run I/O.
+    let io_panel = Panel::builder(&notebook).build();
     let sizer = BoxSizer::builder(Orientation::Vertical).build();
 
-    let io_label = StaticText::builder(&io_panel).with_label("Run I/O").build();
+    let io_label = StaticText::builder(&io_panel).with_label("Program output (read only)").build();
     sizer.add(&io_label, 0, SizerFlag::All, 2);
 
     let io_output = TextCtrl::builder(&io_panel)
         .with_style(TextCtrlStyle::MultiLine | TextCtrlStyle::ReadOnly)
         .build();
-    io_output.set_value("program output appears here\n");
-    io_output.set_accessibility_label("Run I/O output");
-    io_output.set_accessibility_description("Read-only output of the running program");
+    io_output.set_accessibility_label("Run I O output");
+    io_output.set_accessibility_description("Read only output of the running program");
     #[cfg(target_os = "windows")]
     io_output.set_accessibility_role(AccRole::StaticText);
     sizer.add(&io_output, 1, SizerFlag::Expand | SizerFlag::All, 2);
 
-    let input_label = StaticText::builder(&io_panel)
-        .with_label("Program input")
-        .build();
-    sizer.add(&input_label, 0, SizerFlag::All, 2);
+    let input_row = BoxSizer::builder(Orientation::Horizontal).build();
+    let input_label = StaticText::builder(&io_panel).with_label("Program input:").build();
+    input_row.add(&input_label, 0, SizerFlag::AlignCenterVertical | SizerFlag::All, 2);
 
-    let input = TextCtrl::builder(&io_panel).build();
-    input.set_accessibility_label("Program input");
-    input.set_accessibility_description("Text forwarded to the program on each read");
+    let io_input = TextCtrl::builder(&io_panel).build();
+    io_input.set_accessibility_label("Program input");
+    io_input.set_accessibility_description("Text forwarded to the program when you choose Send");
     #[cfg(target_os = "windows")]
-    input.set_accessibility_role(AccRole::Text);
-    sizer.add(&input, 0, SizerFlag::Expand | SizerFlag::All, 2);
+    io_input.set_accessibility_role(AccRole::Text);
+    input_row.add(&io_input, 1, SizerFlag::Expand | SizerFlag::All, 2);
+
+    let send_input = Button::builder(&io_panel).with_label("Send").build();
+    send_input.set_accessibility_label("Send program input");
+    send_input.set_accessibility_description("Forward the input line to the running program");
+    input_row.add(&send_input, 0, SizerFlag::All, 2);
+    sizer.add_sizer(&input_row, 0, SizerFlag::Expand, 0);
 
     io_panel.set_sizer(sizer, true);
-    io_panel
+    notebook.add_page(&io_panel, "Run I/O", true, None);
+
+    // Tab 2: Assembler messages.
+    let msg_panel = Panel::builder(&notebook).build();
+    let msg_sizer = BoxSizer::builder(Orientation::Vertical).build();
+    let messages = ListCtrl::builder(&msg_panel)
+        .with_style(ListCtrlStyle::Report | ListCtrlStyle::SingleSel)
+        .build();
+    messages.insert_column(0, "Severity", ListColumnFormat::Left, 80);
+    messages.insert_column(1, "Where", ListColumnFormat::Left, 150);
+    messages.insert_column(2, "Message", ListColumnFormat::Left, 420);
+    messages.set_accessibility_label("Assembler messages");
+    messages.set_accessibility_description("Assembly errors and warnings");
+    msg_sizer.add(&messages, 1, SizerFlag::Expand | SizerFlag::All, 2);
+    msg_panel.set_sizer(msg_sizer, true);
+    notebook.add_page(&msg_panel, "Assembler Messages", false, None);
+
+    (notebook, io_output, io_input, send_input, messages)
 }
 
-fn bind_menu_events(frame: &Frame, status_bar: &StatusBar) {
-    let sb = *status_bar;
-    let fr = *frame;
-    frame.on_menu(move |event| {
+// --- Actions ---------------------------------------------------------------
+
+fn do_assemble(widgets: &Widgets, shared: &Shared, narrator: &Narrator, cmd_tx: &Sender<Cmd>) {
+    let text = widgets.editor.get_text();
+    let name = shared
+        .program_path
+        .borrow()
+        .as_ref()
+        .and_then(|p| std::path::Path::new(p).file_name().map(|f| f.to_string_lossy().into_owned()))
+        .unwrap_or_else(|| "main.s".to_string());
+    let files = vec![rvasm::InputFile { name, source: text }];
+    let result = rvasm::assemble(&files, &rvasm::AsmConfig::default());
+
+    widgets.messages.delete_all_items();
+    for (i, d) in result.diagnostics.iter().enumerate() {
+        let severity = if d.is_error() { "error" } else { "warning" };
+        let idx = widgets.messages.insert_item(i as i64, severity, None);
+        let where_text = format!("{}:{}:{}", files[d.pos.file].name, d.pos.line, d.pos.col + 1);
+        widgets.messages.set_item_text_by_column(idx as i64, 1, &where_text);
+        widgets.messages.set_item_text_by_column(idx as i64, 2, &d.message);
+    }
+
+    let first_error = result.diagnostics.iter().find(|d| d.is_error()).map(|d| {
+        format!("{}:{}:{}: {}", files[d.pos.file].name, d.pos.line, d.pos.col + 1, d.message)
+    });
+    let error_count = result.diagnostics.iter().filter(|d| d.is_error()).count();
+    let ok = !result.has_errors();
+    let instructions = result.program.as_ref().map(|p| p.statements.len()).unwrap_or(0);
+    narrator.speak(narration::assemble_done(
+        *shared.verbosity.borrow(),
+        ok,
+        instructions,
+        error_count,
+        first_error.as_deref(),
+    ));
+
+    if ok {
+        if let Some(program) = result.program {
+            widgets
+                .status_bar
+                .set_status_text(&format!("Assembled, {} instructions. Ready to run.", program.statements.len()), 0);
+            cmd_tx.send(Cmd::Load(Box::new(program))).ok();
+        }
+    } else {
+        widgets.status_bar.set_status_text("Assembly failed; see Assembler Messages", 0);
+    }
+}
+
+fn bind_menu_events(widgets: &Widgets, shared: &std::rc::Rc<Shared>, narrator: &std::rc::Rc<Narrator>, cmd_tx: &Sender<Cmd>) {
+    let fr = widgets.frame;
+    let w = widgets.clone();
+    let sh = std::rc::Rc::clone(shared);
+    let nar = std::rc::Rc::clone(narrator);
+    let tx = cmd_tx.clone();
+    fr.on_menu(move |event| {
         match event.get_id() {
-            ID_SETTINGS => show_settings_dialog(&fr),
-            ID_SHORTCUTS => show_shortcuts_dialog(&fr),
-            ID_ABOUT => sb.set_status_text("AsAccess accessibility spike build", 0),
-            id => {
-                let text = match id {
-                    ID_NEW => "New file",
-                    ID_OPEN => "Open file",
-                    ID_SAVE => "Save file",
-                    ID_EXIT => "Exit",
-                    ID_RUN_ASSEMBLE => "Assemble",
-                    ID_RUN_RUN => "Run",
-                    ID_RUN_STEP => "Step",
-                    ID_RUN_STOP => "Stop",
-                    _ => "",
+            ID_NEW => {
+                w.editor.set_text("");
+                *sh.program_path.borrow_mut() = None;
+                w.status_bar.set_status_text("New file", 0);
+            }
+            ID_OPEN => {
+                let dialog = FileDialog::builder(&fr)
+                    .with_message("Open assembly source")
+                    .with_wildcard("Assembly sources (*.s;*.asm)|*.s;*.asm|All files (*.*)|*.*")
+                    .build();
+                if dialog.show_modal() == ID_OK {
+                    if let Some(path) = dialog.get_path() {
+                        match std::fs::read_to_string(&path) {
+                            Ok(text) => {
+                                w.editor.set_text(&text);
+                                *sh.program_path.borrow_mut() = Some(path.clone());
+                                w.status_bar.set_status_text(&format!("Opened {path}"), 0);
+                            }
+                            Err(e) => w.status_bar.set_status_text(&format!("Cannot open {path}: {e}"), 0),
+                        }
+                    }
+                }
+                dialog.destroy();
+            }
+            ID_SAVE => {
+                let existing = sh.program_path.borrow().clone();
+                let path = match existing {
+                    Some(p) => p,
+                    None => {
+                        let dialog = FileDialog::builder(&fr)
+                            .with_message("Save assembly source")
+                            .with_wildcard("Assembly sources (*.s;*.asm)|*.s;*.asm|All files (*.*)|*.*")
+                            .build();
+                        let chosen = if dialog.show_modal() == ID_OK { dialog.get_path() } else { None };
+                        dialog.destroy();
+                        match chosen {
+                            Some(p) => p,
+                            None => return,
+                        }
+                    }
                 };
-                if !text.is_empty() {
-                    sb.set_status_text(text, 0);
+                let text = w.editor.get_text();
+                match std::fs::write(&path, text) {
+                    Ok(()) => {
+                        *sh.program_path.borrow_mut() = Some(path.clone());
+                        w.status_bar.set_status_text(&format!("Saved {path}"), 0);
+                    }
+                    Err(e) => w.status_bar.set_status_text(&format!("Cannot save {path}: {e}"), 0),
                 }
             }
+            ID_SETTINGS => show_settings_dialog(&fr, &sh),
+            ID_RECONNECT_SPEECH => {
+                nar.reconnect();
+                w.status_bar.set_status_text(&nar.backend_summary(), 0);
+            }
+            ID_EXIT => fr.close(true),
+            ID_RUN_ASSEMBLE => do_assemble(&w, &sh, &nar, &tx),
+            ID_RUN_RUN => { tx.send(Cmd::Run).ok(); }
+            ID_RUN_STEP => { tx.send(Cmd::Step).ok(); }
+            ID_RUN_BACKSTEP => { tx.send(Cmd::Backstep).ok(); }
+            ID_RUN_PAUSE => { tx.send(Cmd::Pause).ok(); }
+            ID_RUN_STOP => { tx.send(Cmd::Pause).ok(); }
+            ID_RUN_RESET => { tx.send(Cmd::Reset).ok(); }
+            ID_SHORTCUTS => show_shortcuts_dialog(&fr),
+            ID_ABOUT => w.status_bar.set_status_text("AsAccess: an accessibility-first RISC-V IDE", 0),
+            _ => {}
         }
     });
 }
 
 // --- Dialogs ---------------------------------------------------------------
 
-/// Settings dialog: three labeled controls with static-text labels laid out in
-/// sizers next to the inputs, and matching accessible names on the inputs.
-fn show_settings_dialog(frame: &Frame) {
+fn show_settings_dialog(frame: &Frame, shared: &Rc<Shared>) {
     let dialog = Dialog::builder(frame, "Settings")
         .with_style(DialogStyle::DefaultDialogStyle | DialogStyle::ResizeBorder)
-        .with_size(420, 240)
+        .with_size(420, 200)
         .build();
     dialog.set_accessibility_label("Settings dialog");
 
     let panel = Panel::builder(&dialog).build();
     let sizer = BoxSizer::builder(Orientation::Vertical).build();
 
-    // Verbosity choice.
-    let verbosity_label = StaticText::builder(&panel).with_label("Verbosity:").build();
+    let verbosity_label = StaticText::builder(&panel).with_label("Announcement verbosity:").build();
     let verbosity = Choice::builder(&panel)
-        .with_choices(vec![
-            "Quiet".to_string(),
-            "Normal".to_string(),
-            "Verbose".to_string(),
-        ])
-        .with_selection(Some(1))
+        .with_choices(vec!["Off".to_string(), "Brief".to_string(), "Verbose".to_string()])
+        .with_selection(Some(match *shared.verbosity.borrow() {
+            Verbosity::Off => 0,
+            Verbosity::Brief => 1,
+            Verbosity::Verbose => 2,
+        }))
         .build();
-    verbosity.set_accessibility_label("Verbosity");
-    verbosity.set_accessibility_description("How much narration detail to speak");
+    verbosity.set_accessibility_label("Announcement verbosity");
+    verbosity.set_accessibility_description("How much narration detail the screen reader speaks");
     let verbosity_row = BoxSizer::builder(Orientation::Horizontal).build();
     verbosity_row.add(&verbosity_label, 0, SizerFlag::AlignCenterVertical | SizerFlag::All, 4);
     verbosity_row.add(&verbosity, 1, SizerFlag::Expand | SizerFlag::All, 4);
     sizer.add_sizer(&verbosity_row, 0, SizerFlag::Expand, 0);
 
-    // Editor fallback checkbox.
-    let fallback = CheckBox::builder(&panel)
-        .with_label("Use editor fallback when narration is unavailable")
-        .with_value(true)
-        .build();
-    fallback.set_accessibility_label("Use editor fallback");
-    fallback.set_accessibility_description(
-        "Announce editor state through the editor control if speech is unavailable",
-    );
-    sizer.add(&fallback, 0, SizerFlag::All, 4);
-
-    // Theme choice.
-    let theme_label = StaticText::builder(&panel).with_label("Theme:").build();
-    let theme = Choice::builder(&panel)
-        .with_choices(vec![
-            "System".to_string(),
-            "Light".to_string(),
-            "Dark".to_string(),
-        ])
-        .with_selection(Some(0))
-        .build();
-    theme.set_accessibility_label("Theme");
-    theme.set_accessibility_description("Interface color theme");
-    let theme_row = BoxSizer::builder(Orientation::Horizontal).build();
-    theme_row.add(&theme_label, 0, SizerFlag::AlignCenterVertical | SizerFlag::All, 4);
-    theme_row.add(&theme, 1, SizerFlag::Expand | SizerFlag::All, 4);
-    sizer.add_sizer(&theme_row, 0, SizerFlag::Expand, 0);
-
-    // Close button.
     let close_btn = Button::builder(&panel).with_label("Close").build();
     close_btn.set_accessibility_label("Close settings");
     let dlg = dialog;
+    let choice = verbosity;
+    let sh = shared.clone();
     close_btn.on_click(move |_| {
+        if let Some(sel) = choice.get_selection() {
+            *sh.verbosity.borrow_mut() = match sel {
+                0 => Verbosity::Off,
+                1 => Verbosity::Brief,
+                _ => Verbosity::Verbose,
+            };
+        }
         dlg.end_modal(ID_OK);
     });
     sizer.add(&close_btn, 0, SizerFlag::AlignCenterHorizontal | SizerFlag::All, 8);
@@ -380,24 +735,28 @@ fn show_settings_dialog(frame: &Frame) {
     dialog.destroy();
 }
 
-/// Keyboard Shortcuts dialog: report-mode list control of action + shortcut.
 fn show_shortcuts_dialog(frame: &Frame) {
     let dialog = Dialog::builder(frame, "Keyboard Shortcuts")
         .with_style(DialogStyle::DefaultDialogStyle | DialogStyle::ResizeBorder)
-        .with_size(460, 320)
+        .with_size(460, 400)
         .build();
     dialog.set_accessibility_label("Keyboard shortcuts dialog");
 
     let panel = Panel::builder(&dialog).build();
     let sizer = BoxSizer::builder(Orientation::Vertical).build();
 
-    let shortcuts: [(&str, &str); 7] = [
-        ("Assemble", "F7"),
+    let shortcuts: [(&str, &str); 12] = [
+        ("Assemble", "F3"),
         ("Run program", "F5"),
-        ("Step instruction", "F10"),
-        ("Stop program", "Shift+F5"),
+        ("Pause run", "F9"),
+        ("Step instruction", "F7"),
+        ("Backstep instruction", "F8"),
+        ("Stop program", "F11"),
+        ("Reset program", "F12"),
+        ("New file", "Ctrl+N"),
         ("Open file", "Ctrl+O"),
         ("Save file", "Ctrl+S"),
+        ("Settings", "File menu"),
         ("Show this dialog", "F1"),
     ];
 
@@ -405,14 +764,13 @@ fn show_shortcuts_dialog(frame: &Frame) {
         .with_style(ListCtrlStyle::Report | ListCtrlStyle::SingleSel)
         .build();
     list.insert_column(0, "Action", ListColumnFormat::Left, 240);
-    list.insert_column(1, "Shortcut", ListColumnFormat::Left, 140);
+    list.insert_column(1, "Shortcut", ListColumnFormat::Left, 160);
     for (i, (action, key)) in shortcuts.iter().enumerate() {
         let idx = list.insert_item(i as i64, action, None);
         list.set_item_text_by_column(idx as i64, 1, key);
     }
     list.set_accessibility_label("Keyboard shortcuts list");
-    let sizer_list = &list;
-    sizer.add(sizer_list, 1, SizerFlag::Expand | SizerFlag::All, 4);
+    sizer.add(&list, 1, SizerFlag::Expand | SizerFlag::All, 4);
 
     let close_btn = Button::builder(&panel).with_label("Close").build();
     close_btn.set_accessibility_label("Close keyboard shortcuts");
