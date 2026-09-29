@@ -8,8 +8,10 @@ mod host;
 mod mmio;
 mod memory;
 mod syscalls;
+mod trap;
 
 pub use host::{Host, ScriptHost, StdHost};
+pub use trap::irq;
 
 use crate::memory::{MemError, MemLayout, Memory};
 use crate::mmio::Mmio;
@@ -91,11 +93,22 @@ impl StepOutcome {
 #[derive(Debug, Clone, Copy)]
 enum Undo {
     Boundary,
+    /// Marker that this statement retired an instruction (backstep only
+    /// rewinds `instret` for those; traps and parked wfis do not).
+    Retired,
     Reg { index: usize, old: u64 },
     FReg { index: usize, old: u64 },
     Csr { id: u16, old: u64 },
     Mem { addr: u32, old: u64, width: u8 },
     Pc { old: u32 },
+    /// A trap consumed the timer's current tick; undo reschedules it.
+    TimerDeadline { old: u64 },
+    /// A trap consumed the transmitter's edge request; undo re-latches it.
+    XmitEdge,
+    /// A trap cleared the software request; undo re-raises it.
+    SoftwareIrq,
+    /// `wfi` parked the hart; undo un-parks.
+    Waiting { old: bool },
 }
 
 struct Journal {
@@ -140,15 +153,26 @@ pub struct Machine {
     pub(crate) csrs: std::collections::BTreeMap<u16, u64>,
     pub(crate) pc: u32,
     pub(crate) mem: Memory,
-    mmio: Mmio,
+    pub(crate) mmio: Mmio,
     layout: MemLayout,
     config: MachineConfig,
     program: Program,
-    breakpoints: BTreeSet<u32>,
-    journal: Journal,
-    host: Box<dyn Host>,
-    terminated: Option<Halt>,
+    pub(crate) breakpoints: BTreeSet<u32>,
+    pub(crate) journal: Journal,
+    pub(crate) host: Box<dyn Host>,
+    pub(crate) terminated: Option<Halt>,
     pub(crate) instret: u64,
+    /// Hart parked in `wfi` (no deliverable interrupt).
+    pub(crate) waiting: bool,
+    /// Armed timer period in retired instructions (None = disarmed).
+    pub(crate) timer_interval: Option<u64>,
+    /// instret value at which the armed timer next fires.
+    pub(crate) timer_deadline: u64,
+    /// Pending software interrupt request (no producer yet; tools later).
+    pub(crate) software_pending: bool,
+    /// One-shot breakpoint skip armed by `continue_after_stop` so the
+    /// breakpoint under the stopped pc does not re-fire immediately.
+    pub(crate) skip_break_once: Option<u32>,
 }
 
 // CSR addresses (RARS's set).
@@ -215,6 +239,11 @@ impl Machine {
             host,
             terminated: None,
             instret: 0,
+            waiting: false,
+            timer_interval: None,
+            timer_deadline: 0,
+            software_pending: false,
+            skip_break_once: None,
         };
         m.regs[3] = 0x1000_8000; // gp
         m.regs[2] = 0x7fff_effc; // sp
@@ -247,9 +276,10 @@ impl Machine {
         self.fregs[index]
     }    pub fn csr(&self, id: u16) -> u64 {
         match id {
-            // Sequential model: cycle tracks instret; time is cached by the
-            // time syscall when programs read it.
-            csr::CYCLE | csr::CYCLEH | csr::INSTRET | csr::INSTRETH => self.instret,
+            // Sequential model: cycle/time track instret. `time` reads as the
+            // retired-instruction clock; the wall-clock time stays with the
+            // host-driven time syscall (a7 = 30).
+            csr::CYCLE | csr::CYCLEH | csr::TIME | csr::TIMEH | csr::INSTRET | csr::INSTRETH => self.instret,
             other => self.csrs.get(&other).copied().unwrap_or(0),
         }
     }
@@ -311,13 +341,26 @@ impl Machine {
         StepOutcome::halted(h)
     }
 
-    /// Execute exactly one instruction, or report a breakpoint stop.
+    /// Execute exactly one instruction, or report a breakpoint stop. The
+    /// space between instructions is also the interrupt delivery point: after
+    /// an instruction retires (and before the next one), one pending
+    /// interrupt may trap into the handler.
     pub fn step(&mut self) -> StepOutcome {
         if self.terminated.is_some() {
             return StepOutcome::empty();
         }
-        // Breakpoints fire before the instruction at the marked address runs.
-        if self.breakpoints.contains(&self.pc) {
+        if self.waiting {
+            // Hart parked at a wfi: see whether anything can wake it. A
+            // stalled wake keeps the machine waiting and reports a no-op.
+            if !self.refresh_wake() {
+                return StepOutcome { executed: false, pc_before: self.pc, events: Vec::new(), changes: Vec::new() };
+            }
+            self.waiting = false;
+        }
+        // Breakpoints fire before the instruction at the marked address runs
+        // (unless continue_after_stop armed a one-shot skip for this pc).
+        let skip = self.skip_break_once.take() == Some(self.pc);
+        if self.breakpoints.contains(&self.pc) && !skip {
             self.terminated = Some(Halt::Breakpoint);
             return StepOutcome::halted(Halt::Breakpoint);
         }
@@ -325,7 +368,15 @@ impl Machine {
             return self.dropped_off();
         }
         if (self.pc & 0x3) != 0 {
-            return self.error(format!("instruction address 0x{:08x} is not word-aligned", self.pc));
+            // A misaligned fetch is a synchronous exception like any other
+            // once a handler is installed; without utvec it halts as before.
+            let pc = self.pc;
+            if self.read_csr(csr::UTVEC) != 0 {
+                let mut out = StepOutcome { executed: false, pc_before: pc, events: Vec::new(), changes: Vec::new() };
+                self.take_trap(crate::trap::exc::INSN_MISALIGNED, u64::from(pc), false, pc, &mut out.changes);
+                return self.trap_entry_breakpoint(out);
+            }
+            return self.error(format!("instruction address 0x{pc:08x} is not word-aligned"));
         }
 
         self.journal.begin_statement();
@@ -338,20 +389,66 @@ impl Machine {
         };
 
         let outcome = exec::execute(self, word, pc_before);
+        // A wfi with nothing pending parked the hart: pc stays at the wfi,
+        // nothing retires, and the run loop takes over the waiting.
+        if self.waiting {
+            self.journal.push(Undo::Waiting { old: false });
+            return outcome.outcome;
+        }
         // The instruction retired even when it halted the machine (an exit
         // ecall, for instance); RARS counts it.
         if outcome.outcome.executed {
             self.instret += 1;
+            self.journal.push(Undo::Retired);
         }
         if outcome.terminated_now {
+            // Synchronous exceptions (address faults, illegal instructions)
+            // vector through utvec when a handler is configured, matching
+            // RARS's "exception handler loaded" behavior; without one they
+            // halt with the error as before. Exits and ebreak stay halts.
+            if let Some((cause, tval)) = outcome.exception {
+                if self.read_csr(csr::UTVEC) != 0 {
+                    let mut out = outcome.outcome;
+                    out.events.clear(); // the deferred error halt never happened
+                    // The faulting instruction did not retire: uepc points
+                    // back at it so uret can retry (or report) it.
+                    self.take_trap(cause, tval, false, pc_before, &mut out.changes);
+                    return self.trap_entry_breakpoint(out);
+                }
+                // Keep the halt and record it on the machine (halt_reason,
+                // is_terminated) the way every other stop does.
+                if let Some(Event::Halted(h)) = outcome.outcome.events.last() {
+                    self.terminated = Some(h.clone());
+                }
+                return outcome.outcome;
+            }
             return outcome.outcome;
+        }
+
+        // Delivery point: one pending interrupt may trap between the
+        // instruction that just retired and the next one.
+        let mut outcome = outcome.outcome;
+        self.poll_input();
+        if let Some(cause) = self.deliverable_interrupt() {
+            self.take_trap(cause, 0, true, self.pc, &mut outcome.changes);
+            return self.trap_entry_breakpoint(outcome);
         }
 
         // Cliff: PC moved past the last statement.
         if self.pc >= self.program.text_end() {
             return self.dropped_off();
         }
-        outcome.outcome
+        outcome
+    }
+
+    /// A trap just entered the handler: honor the RARS gap where breakpoints
+    /// must also fire on trap-handler entry (RARS PR #225).
+    fn trap_entry_breakpoint(&mut self, mut out: StepOutcome) -> StepOutcome {
+        if self.breakpoints.contains(&self.pc) {
+            self.terminated = Some(Halt::Breakpoint);
+            out.events.push(Event::Halted(Halt::Breakpoint));
+        }
+        out
     }
 
     fn dropped_off(&mut self) -> StepOutcome {
@@ -360,7 +457,8 @@ impl Machine {
         StepOutcome::halted(h)
     }
 
-    /// Run until a halt or `max_steps` instructions have executed.
+    /// Run until a halt, `max_steps` instructions have executed, or the hart
+    /// parked in `wfi` with nothing left that could wake it.
     pub fn run(&mut self, max_steps: Option<u64>) -> Vec<Event> {
         let mut events = Vec::new();
         let mut steps = 0u64;
@@ -369,6 +467,19 @@ impl Machine {
             let halted = outcome.events.iter().any(|e| matches!(e, Event::Halted(_)));
             events.extend(outcome.events);
             if halted {
+                break;
+            }
+            if self.waiting {
+                // Parked: sleep one tick, then refresh the wake sources (host
+                // input, timer). A wake falls back into stepping so the next
+                // pass delivers the interrupt; with no armed timer and no
+                // input the hart can only be woken by a future keystroke, so
+                // hand control back to the driver (call run again later).
+                self.host_mut().sleep_ms(1);
+                if self.refresh_wake() {
+                    self.waiting = false;
+                    continue;
+                }
                 break;
             }
             steps += 1;
@@ -383,12 +494,16 @@ impl Machine {
         events
     }
 
-    /// Undo the most recently executed instruction. Returns false when the
-    /// journal is exhausted or the program has exited.
+    /// Undo the most recently executed statement — an instruction, or a trap
+    /// entry, or a parked wfi. Returns false when the journal is exhausted or
+    /// the program has exited.
     pub fn backstep(&mut self) -> bool {
         let Some(recs) = self.journal.pop_statement() else {
             return false;
         };
+        // Only statements that retired an instruction rewind the counter;
+        // trap entries and parked wfis never incremented it.
+        let retired = recs.iter().any(|r| matches!(r, Undo::Retired));
         for rec in recs {
             match rec {
                 Undo::Reg { index, old } => {
@@ -407,15 +522,23 @@ impl Machine {
                     self.mem.write_bytes(addr, &bytes[..width as usize]);
                 }
                 Undo::Pc { old } => self.pc = old,
-                Undo::Boundary => {}
+                Undo::TimerDeadline { old } => self.timer_deadline = old,
+                Undo::XmitEdge => self.mmio.restore_xmit_edge(),
+                Undo::SoftwareIrq => self.software_pending = true,
+                Undo::Waiting { old } => self.waiting = old,
+                Undo::Retired | Undo::Boundary => {}
             }
         }
         self.terminated = None;
-        self.instret = self.instret.saturating_sub(1);
+        if retired {
+            self.instret = self.instret.saturating_sub(1);
+        }
         true
     }
 
-    /// Reset to the post-assembly state, keeping breakpoints.
+    /// Reset to the post-assembly state, keeping breakpoints. Simulated
+    /// device/trap state (armed timer, waiting flag, pending requests) is
+    /// cleared; the host re-arms the timer after a reset.
     pub fn reset(&mut self) {
         self.regs = [0; 32];
         self.fregs = [0; 32];
@@ -428,6 +551,10 @@ impl Machine {
         self.journal.records.clear();
         self.terminated = None;
         self.instret = 0;
+        self.waiting = false;
+        self.software_pending = false;
+        self.skip_break_once = None;
+        self.clear_timer();
     }
 
     /// Publish program arguments the RARS way: argv strings go just below
@@ -526,7 +653,7 @@ impl Machine {
 
     pub(crate) fn read_csr(&self, id: u16) -> u64 {
         match id {
-            csr::CYCLE | csr::CYCLEH | csr::INSTRET | csr::INSTRETH => self.instret,
+            csr::CYCLE | csr::CYCLEH | csr::TIME | csr::TIMEH | csr::INSTRET | csr::INSTRETH => self.instret,
             other => self.csrs.get(&other).copied().unwrap_or(0),
         }
     }
@@ -756,6 +883,94 @@ ecall
         let mut m = machine("    li t0, 8\n    lw a0, 0(t0)\n");
         let events = m.run(None);
         assert!(matches!(events.last(), Some(Event::Halted(Halt::Error { .. }))));
+    }
+
+    #[test]
+    fn continue_after_stop_runs_past_breakpoint_and_refires_on_return() {
+        let src = "\
+    li t0, 3
+loop:
+    addi a0, a0, 1
+    blt a0, t0, loop
+    li a7, 10
+    ecall
+";
+        let mut m = machine(src);
+        let loop_addr = m.program().statements[1].addr;
+        m.set_breakpoint(loop_addr, true);
+        // First arrival: stop before a0 is touched.
+        let events = m.run(None);
+        assert_eq!(events.last(), Some(&Event::Halted(Halt::Breakpoint)));
+        assert_eq!(m.reg(10), 0);
+        // Continue: the breakpoint under the pc is skipped once...
+        m.continue_after_stop();
+        assert!(!m.is_terminated());
+        // ...and fires again on the NEXT arrival at the same address.
+        let events = m.run(None);
+        assert_eq!(events.last(), Some(&Event::Halted(Halt::Breakpoint)));
+        assert_eq!(m.reg(10), 1);
+        // Each pass needs its own continue (a0 = 2 next) before the loop
+        // condition finally releases and the program exits.
+        m.continue_after_stop();
+        let events = m.run(None);
+        assert_eq!(events.last(), Some(&Event::Halted(Halt::Breakpoint)));
+        assert_eq!(m.reg(10), 2);
+        m.continue_after_stop();
+        let events = m.run(None);
+        assert_eq!(events.last(), Some(&Event::Halted(Halt::Exit { code: 0 })));
+        assert_eq!(m.reg(10), 3);
+        // Real terminations are not continuable.
+        m.continue_after_stop();
+        assert!(m.is_terminated());
+    }
+
+    #[test]
+    fn continue_after_stop_resumes_past_ebreak() {
+        let src = "\
+    addi a0, a0, 5
+    ebreak
+    addi a0, a0, 2
+    li a7, 93
+    ecall
+";
+        let mut m = machine(src);
+        let events = m.run(None);
+        assert_eq!(events.last(), Some(&Event::Halted(Halt::Ebreak)));
+        m.continue_after_stop();
+        assert!(!m.is_terminated());
+        m.run(None);
+        assert_eq!(m.reg(10), 7);
+        assert_eq!(m.exit_code(), Some(7)); // service 93 exits with a0
+    }
+
+    #[test]
+    fn time_csr_tracks_instret() {
+        let src = "\
+    csrrs a0, time, x0
+    csrrs a1, timeh, x0
+";
+        let mut m = machine(src);
+        m.run(None);
+        // Each read samples the clock before its own instruction retires.
+        assert_eq!(m.reg(10), 0);
+        assert_eq!(m.reg(11), 1);
+        assert_eq!(m.csr(csr::TIME), m.instret());
+        assert_eq!(m.csr(csr::TIMEH), m.instret());
+        assert_eq!(m.instret(), 2);
+    }
+
+    #[test]
+    fn dropped_off_and_limit_do_not_vector() {
+        // A single nop past the end of text drops off even with a handler
+        // installed: only synchronous exceptions vector.
+        let mut m = machine("    nop\n");
+        m.csrs.insert(csr::UTVEC, u64::from(m.program().text_base + 0x400));
+        let events = m.run(None);
+        assert_eq!(events.last(), Some(&Event::Halted(Halt::DroppedOff)));
+        let mut m = machine("loop: j loop\n");
+        m.csrs.insert(csr::UTVEC, u64::from(m.program().text_base + 0x400));
+        let events = m.run(Some(10));
+        assert_eq!(events.last(), Some(&Event::Halted(Halt::Limit)));
     }
 
     #[test]

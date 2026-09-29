@@ -4,12 +4,17 @@
 
 use crate::csr;
 use crate::fp;
+use crate::memory::MemError;
+use crate::trap::exc;
 use crate::{Change, Event, Halt, Machine, StepOutcome};
 
 pub(crate) struct ExecOutcome {
     pub outcome: StepOutcome,
     /// True when the machine must stop stepping (halt already recorded).
     pub terminated_now: bool,
+    /// Synchronous exception attached to a `Halt::Error`: (cause, utval). The
+    /// run loop vectors it through utvec when a handler is configured.
+    pub exception: Option<(u32, u64)>,
 }
 
 impl ExecOutcome {
@@ -17,6 +22,7 @@ impl ExecOutcome {
         ExecOutcome {
             outcome: StepOutcome { executed: true, pc_before, events, changes },
             terminated_now: false,
+            exception: None,
         }
     }
 
@@ -26,6 +32,27 @@ impl ExecOutcome {
         ExecOutcome {
             outcome: StepOutcome { executed: false, pc_before, events: evs, changes: Vec::new() },
             terminated_now: true,
+            exception: None,
+        }
+    }
+
+    /// A halt that is really a synchronous exception; `exc` carries the cause
+    /// and the utval so the caller can vector it when utvec is configured.
+    fn halt_exc(h: Halt, events: Vec<Event>, pc_before: u32, exc: Option<(u32, u64)>) -> Self {
+        let mut out = Self::halt(h, events, pc_before);
+        out.exception = exc;
+        out
+    }
+}
+
+/// Map a memory fault to its exception cause and utval.
+fn mem_exception(e: &MemError, store: bool) -> (u32, u64) {
+    match e {
+        MemError::Unaligned { addr, .. } => {
+            (if store { exc::STORE_MISALIGNED } else { exc::LOAD_MISALIGNED }, u64::from(*addr))
+        }
+        MemError::AccessViolation { addr } => {
+            (if store { exc::STORE_FAULT } else { exc::LOAD_FAULT }, u64::from(*addr))
         }
     }
 }
@@ -94,7 +121,14 @@ pub(crate) fn execute(m: &mut Machine, w: u32, pc_before: u32) -> ExecOutcome {
 
     macro_rules! bail {
         ($msg:expr) => {
-            return ExecOutcome::halt(Halt::Error { message: $msg }, events, pc_before)
+            // Every bail here is an illegal-instruction class fault; utval
+            // carries the offending word for the handler.
+            return ExecOutcome::halt_exc(
+                Halt::Error { message: $msg },
+                events,
+                pc_before,
+                Some((exc::ILLEGAL_INSN, w as u64)),
+            )
         };
     }
 
@@ -155,7 +189,14 @@ pub(crate) fn execute(m: &mut Machine, w: u32, pc_before: u32) -> ExecOutcome {
             };
             match loaded {
                 Ok(v) => m.write_reg(rd(w), v, &mut changes),
-                Err(e) => bail!(e.to_string()),
+                Err(e) => {
+                    return ExecOutcome::halt_exc(
+                        Halt::Error { message: e.to_string() },
+                        events,
+                        pc_before,
+                        Some(mem_exception(&e, false)),
+                    )
+                }
             }
         }
         0x23 => {
@@ -169,7 +210,12 @@ pub(crate) fn execute(m: &mut Machine, w: u32, pc_before: u32) -> ExecOutcome {
                 f => bail!(format!("invalid store funct3 {f}")),
             };
             if let Err(e) = r {
-                bail!(e.to_string());
+                return ExecOutcome::halt_exc(
+                    Halt::Error { message: e.to_string() },
+                    events,
+                    pc_before,
+                    Some(mem_exception(&e, true)),
+                );
             }
         }
         0x13 => {
@@ -307,28 +353,48 @@ pub(crate) fn execute(m: &mut Machine, w: u32, pc_before: u32) -> ExecOutcome {
                     // ecall
                     let step = crate::syscalls::dispatch(m, &mut events, pc_before);
                     let terminated_now = step.events.iter().any(|e| matches!(e, Event::Halted(_)));
-                    return ExecOutcome { outcome: step, terminated_now };
+                    return ExecOutcome { outcome: step, terminated_now, exception: None };
                 } else if imm12 == 1 {
                     m.terminated = Some(Halt::Ebreak);
                     return ExecOutcome::halt(Halt::Ebreak, events, pc_before);
+                } else if imm12 == 0x002 {
+                    // uret: the user-mode return RARS supports.
+                    m.do_uret(&mut changes);
+                } else if imm12 == 0x105 {
+                    // wfi parks the hart until an interrupt is deliverable;
+                    // with one already pending it is a plain no-op that
+                    // retires. Parking rewinds pc (the instruction has not
+                    // completed) and sets the waiting flag; the step returns
+                    // without retiring, and the run loop handles the wait.
+                    if m.deliverable_interrupt().is_none() {
+                        m.pc = pc_before;
+                        m.waiting = true;
+                        return ExecOutcome {
+                            outcome: StepOutcome { executed: false, pc_before, events, changes },
+                            terminated_now: false,
+                            exception: None,
+                        };
+                    }
+                } else {
+                    bail!("invalid system instruction".to_string());
                 }
-                bail!("invalid system instruction".to_string());
-            }
-            // Zicsr
-            let csr_id = ((w >> 20) & 0xfff) as u16;
-            let old = m.read_csr(csr_id);
-            let write_val = match funct3 {
-                1 => Some(m.regs[rs1(w)]),                       // csrrw
-                2 => (m.regs[rs1(w)] != 0).then(|| m.regs[rs1(w)]), // csrrs
-                3 => (m.regs[rs1(w)] != 0).then(|| !m.regs[rs1(w)]), // csrrc
-                5 => Some(imm_i(w) as u32 as u64),               // csrrwi
-                6 => (imm_i(w) != 0).then_some(imm_i(w) as u32 as u64), // csrrsi
-                7 => (imm_i(w) != 0).then_some(!(imm_i(w) as u32 as u64)), // csrrci
-                _ => bail!("invalid csr instruction".to_string()),
-            };
-            m.write_reg(rd(w), old, &mut changes);
-            if let Some(val) = write_val {
-                m.write_csr_raw(csr_id, val, &mut changes);
+            } else {
+                // Zicsr
+                let csr_id = ((w >> 20) & 0xfff) as u16;
+                let old = m.read_csr(csr_id);
+                let write_val = match funct3 {
+                    1 => Some(m.regs[rs1(w)]),                       // csrrw
+                    2 => (m.regs[rs1(w)] != 0).then(|| m.regs[rs1(w)]), // csrrs
+                    3 => (m.regs[rs1(w)] != 0).then(|| !m.regs[rs1(w)]), // csrrc
+                    5 => Some(imm_i(w) as u32 as u64),               // csrrwi
+                    6 => (imm_i(w) != 0).then_some(imm_i(w) as u32 as u64), // csrrsi
+                    7 => (imm_i(w) != 0).then_some(!(imm_i(w) as u32 as u64)), // csrrci
+                    _ => bail!("invalid csr instruction".to_string()),
+                };
+                m.write_reg(rd(w), old, &mut changes);
+                if let Some(val) = write_val {
+                    m.write_csr_raw(csr_id, val, &mut changes);
+                }
             }
         }
         other => bail!(format!(

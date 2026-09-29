@@ -1,7 +1,9 @@
 //! MMIO devices at 0xffff0000: RARS's Keyboard and Display Simulator ports.
 //! The receiver holds keystrokes polled from the host; the transmitter
-//! forwards bytes to the host console. Interrupt delivery is a later task —
-//! the enable bits are plain storage until trap routing lands.
+//! forwards bytes to the host console. Interrupt sources live here too: the
+//! receiver raises its request while a key waits under its enable bit, and
+//! the transmitter latches a request on the rising edge of its enable bit
+//! (see the note on `xmit_edge` for why the edge model).
 
 use crate::host::Host;
 use std::collections::VecDeque;
@@ -10,7 +12,7 @@ use std::collections::VecDeque;
 pub(crate) const WINDOW: u32 = 0x1_0000;
 
 /// Register offsets from the MMIO base.
-mod reg {
+pub(crate) mod reg {
     pub const RECV_CTRL: u32 = 0x00;
     pub const RECV_DATA: u32 = 0x04;
     pub const XMIT_CTRL: u32 = 0x08;
@@ -22,8 +24,14 @@ pub(crate) struct Mmio {
     /// Typed but not yet read keys (bit 0 of receiver control reads 1 while
     /// this is non-empty; reading receiver data pops one).
     pending: VecDeque<u8>,
-    recv_ie: bool,
-    xmit_ie: bool,
+    pub(crate) recv_ie: bool,
+    pub(crate) xmit_ie: bool,
+    /// Transmitter interrupt request latch. RARS fires the display interrupt
+    /// when the transmitter *becomes* ready; our transmitter is always ready,
+    /// so a level model would request forever. Instead the request is latched
+    /// on the 0→1 edge of the enable bit and consumed by trap delivery, so
+    /// each re-enable yields exactly one interrupt (documented interpretation).
+    xmit_edge: bool,
     /// Last cursor-position command (byte 7): X = bits 20-31, Y = bits 8-19.
     /// Recorded for the GUI's future cursor support; our display is the text
     /// stream, so positioning itself is a no-op.
@@ -33,12 +41,56 @@ pub(crate) struct Mmio {
 
 impl Mmio {
     pub(crate) fn new(base: u32) -> Self {
-        Mmio { base, pending: VecDeque::new(), recv_ie: false, xmit_ie: false, cursor: None }
+        Mmio {
+            base,
+            pending: VecDeque::new(),
+            recv_ie: false,
+            xmit_ie: false,
+            xmit_edge: false,
+            cursor: None,
+        }
     }
 
     /// True when an address lands in the MMIO window.
     pub(crate) fn in_window(&self, addr: u32) -> bool {
         addr.wrapping_sub(self.base) < WINDOW
+    }
+
+    /// A key sits in the receiver queue (bit 0 of receiver control).
+    pub(crate) fn has_input(&self) -> bool {
+        !self.pending.is_empty()
+    }
+
+    /// Test hook: drop every queued keystroke.
+    #[cfg(test)]
+    pub(crate) fn clear_input(&mut self) {
+        self.pending.clear();
+    }
+
+    /// Drain whatever keystrokes the host has buffered into the receiver.
+    /// Called from the trap delivery point so interrupt-driven programs see
+    /// keys without touching the MMIO port; gated by `recv_ie` up in the
+    /// machine so polling never steals input from `read_line` syscalls in
+    /// non-interrupt programs.
+    pub(crate) fn poll_input(&mut self, host: &mut dyn Host) {
+        while let Some(c) = host.poll_input_char() {
+            self.pending.push_back(c);
+        }
+    }
+
+    /// Consume the transmitter request latch; true when one was pending.
+    pub(crate) fn take_xmit_edge(&mut self) -> bool {
+        std::mem::take(&mut self.xmit_edge)
+    }
+
+    /// True while the transmitter request latch is set (read-only peek).
+    pub(crate) fn xmit_edge_latched(&self) -> bool {
+        self.xmit_edge
+    }
+
+    /// Re-arm the transmitter request latch (backstep undid a delivery).
+    pub(crate) fn restore_xmit_edge(&mut self) {
+        self.xmit_edge = true;
     }
 
     pub(crate) fn load(&mut self, addr: u32, width: u32, host: &mut dyn Host) -> u64 {
@@ -47,9 +99,7 @@ impl Mmio {
         // callback when a key arrives, so polling on access is what makes the
         // ready bit reflect reality.
         if off == reg::RECV_CTRL || off == reg::RECV_DATA {
-            while let Some(c) = host.poll_input_char() {
-                self.pending.push_back(c);
-            }
+            self.poll_input(host);
         }
         let word: u32 = match off {
             reg::RECV_CTRL => u32::from(!self.pending.is_empty()) | (u32::from(self.recv_ie) << 1),
@@ -77,7 +127,17 @@ impl Mmio {
         match off {
             // The ready bits themselves are read-only state.
             reg::RECV_CTRL => self.recv_ie = value & 0b10 != 0,
-            reg::XMIT_CTRL => self.xmit_ie = value & 0b10 != 0,
+            reg::XMIT_CTRL => {
+                let new_ie = value & 0b10 != 0;
+                // RARS raises the display interrupt when the transmitter
+                // becomes ready. Ready is permanently true here, so the
+                // enable-bit edge stands in for the ready edge: each 0→1
+                // transition requests one interrupt.
+                if new_ie && !self.xmit_ie {
+                    self.xmit_edge = true;
+                }
+                self.xmit_ie = new_ie;
+            }
             reg::XMIT_DATA => {
                 let byte = value as u8;
                 if byte == 0x07 {
@@ -140,6 +200,31 @@ mod tests {
         mmio.store(0xffff_0008, 0b10, &mut host); // enable transmitter interrupt
         assert_eq!(mmio.load(0xffff_0008, 1, &mut host), 3);
         assert_eq!(mmio.load(0xffff_0008, 2, &mut host), 3);
+    }
+
+    #[test]
+    fn transmitter_edge_latches_one_request_per_enable() {
+        let mut mmio = Mmio::new(0xffff_0000);
+        let mut host = ScriptHost::default();
+        assert!(!mmio.xmit_ie);
+        mmio.store(0xffff_0008, 0b10, &mut host); // rising edge: one request
+        assert!(mmio.xmit_ie);
+        mmio.store(0xffff_0008, 0b10, &mut host); // writing 1 again is no edge
+        assert!(mmio.take_xmit_edge());
+        assert!(!mmio.take_xmit_edge());
+        // Disable then re-enable: a fresh edge, a fresh request.
+        mmio.store(0xffff_0008, 0, &mut host);
+        mmio.store(0xffff_0008, 0b10, &mut host);
+        assert!(mmio.take_xmit_edge());
+    }
+
+    #[test]
+    fn receiver_poll_drains_host_keys() {
+        let mut mmio = Mmio::new(0xffff_0000);
+        let mut host = ScriptHost::with_input(vec!["ab".into()]);
+        assert!(!mmio.has_input());
+        mmio.poll_input(&mut host);
+        assert!(mmio.has_input());
     }
 
     #[test]

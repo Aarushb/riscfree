@@ -140,7 +140,24 @@ pub fn start_sim_thread(cmds: Receiver<Cmd>, events: Sender<Evt>, input: InputCh
                     running = false;
                 }
                 Cmd::Run => {
-                    if machine.as_ref().is_some_and(|m| !m.is_terminated()) {
+                    let can_run = match machine.as_ref() {
+                        Some(m) => {
+                            // A debugger stop continues; a finished program
+                            // needs Reset first.
+                            match m.halt_reason() {
+                                None => true,
+                                Some(Halt::Breakpoint | Halt::Ebreak) => {
+                                    if let Some(m) = machine.as_mut() {
+                                        m.continue_after_stop();
+                                    }
+                                    true
+                                }
+                                Some(_) => false,
+                            }
+                        }
+                        None => false,
+                    };
+                    if can_run {
                         running = true;
                     }
                 }
