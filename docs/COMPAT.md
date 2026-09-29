@@ -33,3 +33,8 @@ AsAccess aims for drop-in compatibility with RARS course material: same memory m
 18. **`wfi` waits on our event model**: with nothing pending it parks and the run loop services host keyboard input and armed timers; virtual time fast-forwards to the next timer tick rather than wall-clock waiting.
 19. **Synchronous exceptions vector only when a handler is configured** (`utvec != 0`); otherwise they halt with an error like RARS without an exception handler. Breakpoints fire on trap-handler entry, which RARS does not do (their issue: PR #225 unmerged).
 20. **CSR `time` reads the instruction clock**, not wall time; the syscall-30 wall-clock read is unchanged.
+
+## RV64 mode
+
+21. **The stack top stays 4-aligned in RV64.** RARS's fixed initial `$sp` (0x7fffeffc) is only four-byte aligned, so RV64 programs must keep their own eight-byte alignment before `sd`/`ld` (or enable the unaligned-access setting).
+22. **`negw`, `sext.w`, `zext.*` pseudo-ops are not implemented yet**; the underlying instructions are. RARS's auipc-based label-form `ld` is replaced by the lui+`%lo` form, which is safe given the low-4GB memory map both tools share.
