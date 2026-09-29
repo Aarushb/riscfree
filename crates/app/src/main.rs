@@ -74,6 +74,7 @@ struct Widgets {
     status_bar: StatusBar,
     editor: StyledTextCtrl,
     register_list: ListCtrl,
+    fp_list: ListCtrl,
     program_list: ListCtrl,
     memory_list: ListCtrl,
     memory_addr: TextCtrl,
@@ -214,7 +215,7 @@ fn main() {
             .build();
         right_splitter.set_accessibility_label("Right side panes");
 
-        let (register_notebook, register_list, program_list, memory_list, memory_addr, memory_go) =
+        let (register_notebook, register_list, fp_list, program_list, memory_list, memory_addr, memory_go) =
             build_state_views(&right_splitter);
         let (bottom_notebook, io_output, io_input, send_input, messages) =
             build_bottom_views(&right_splitter);
@@ -230,6 +231,7 @@ fn main() {
             status_bar,
             editor,
             register_list,
+            fp_list,
             program_list,
             memory_list,
             memory_addr,
@@ -363,6 +365,26 @@ fn main() {
         widgets.frame.show(true);
         widgets.frame.centre();
     });
+}
+
+/// Refresh the Floating Point tab rows from a snapshot.
+fn refresh_fp_registers(w: &Widgets, fregs: &[u64; 32]) {
+    FP_ROWS.with(|rows| {
+        let mut rows = rows.borrow_mut();
+        for (i, row) in rows.iter_mut().enumerate() {
+            let bits = fregs[i];
+            row[2] = match rvm::f32_of_freg(bits) {
+                f if f.is_nan() => "NaN".to_string(),
+                f => format!("{f}"),
+            };
+            row[3] = match rvm::f64_of_freg(bits) {
+                f if f.is_nan() => "NaN".to_string(),
+                f => format!("{f}"),
+            };
+            row[4] = format!("0x{bits:016x}");
+        }
+    });
+    w.fp_list.refresh_items(0, 31);
 }
 
 /// Rebuild the Memory tab rows for one 16-byte-per-row window.
@@ -502,8 +524,9 @@ fn handle_sim_event(
             w.io_output.append_text(&text);
         }
         Evt::State(snapshot) => {
-            let bridge::StateSnapshot { regs, pc, instret } = *snapshot;
+            let bridge::StateSnapshot { regs, fregs, pc, instret } = *snapshot;
             refresh_registers(w, &regs);
+            refresh_fp_registers(w, &fregs);
             mark_program_pc(w, pc);
             w.status_bar.set_status_text(&format!("pc 0x{pc:08x}, {instret} executed"), 1);
             let base = *shared.memory_base.borrow();
@@ -589,6 +612,8 @@ thread_local! {
     static PROGRAM_ADDRS: RefCell<Vec<u32>> = const { RefCell::new(Vec::new()) };
     /// Backing rows for the Memory tab: address, hex bytes, ASCII.
     static MEMORY_ROWS: RefCell<Vec<[String; 3]>> = const { RefCell::new(Vec::new()) };
+    /// Backing rows for the Floating Point tab.
+    static FP_ROWS: RefCell<Vec<[String; 5]>> = const { RefCell::new(Vec::new()) };
 }
 
 const ABI: &[&str] = &[
@@ -663,7 +688,7 @@ fn build_editor(parent: &Panel) -> StyledTextCtrl {
     editor
 }
 
-fn build_state_views(parent: &SplitterWindow) -> (Notebook, ListCtrl, ListCtrl, ListCtrl, TextCtrl, Button) {
+fn build_state_views(parent: &SplitterWindow) -> (Notebook, ListCtrl, ListCtrl, ListCtrl, ListCtrl, TextCtrl, Button) {
     let notebook = Notebook::builder(parent).build();
     notebook.set_accessibility_label("State views");
     #[cfg(target_os = "windows")]
@@ -775,7 +800,40 @@ fn build_state_views(parent: &SplitterWindow) -> (Notebook, ListCtrl, ListCtrl, 
     mem_panel.set_sizer(mem_sizer, true);
     notebook.add_page(&mem_panel, "Memory", false, None);
 
-    (notebook, list, prog_list, mem_list, mem_addr, mem_go)
+    // Floating point tab: f registers with float interpretation and raw
+    // bits (NaN-boxing aware via the core's read rule).
+    let fp_panel = Panel::builder(&notebook).build();
+    fp_panel.set_accessibility_label("Floating point pane");
+    let fp_sizer = BoxSizer::builder(Orientation::Vertical).build();
+    let fp_list = ListCtrl::builder(&fp_panel)
+        .with_style(ListCtrlStyle::Report | ListCtrlStyle::Virtual | ListCtrlStyle::SingleSel)
+        .build();
+    fp_list.insert_column(0, "FReg", ListColumnFormat::Left, 70);
+    fp_list.insert_column(1, "Name", ListColumnFormat::Left, 90);
+    fp_list.insert_column(2, "Float", ListColumnFormat::Left, 170);
+    fp_list.insert_column(3, "Double", ListColumnFormat::Left, 190);
+    fp_list.insert_column(4, "Bits (hex)", ListColumnFormat::Left, 130);
+    fp_list.set_item_count(32);
+    assert!(fp_list.set_virtual_text_callback(move |item, col| {
+        FP_ROWS.with(|rows| {
+            rows.borrow()
+                .get(item as usize)
+                .and_then(|row| row.get(col as usize))
+                .cloned()
+                .unwrap_or_default()
+        })
+    }));
+    fp_list.set_accessibility_label("Floating point register values");
+    fp_list.set_accessibility_description(
+        "All thirty-two floating point registers as float, double, and raw bits",
+    );
+    #[cfg(target_os = "windows")]
+    fp_list.set_accessibility_role(AccRole::List);
+    fp_sizer.add(&fp_list, 1, SizerFlag::Expand | SizerFlag::All, 2);
+    fp_panel.set_sizer(fp_sizer, true);
+    notebook.add_page(&fp_panel, "Floating Point", false, None);
+
+    (notebook, list, fp_list, prog_list, mem_list, mem_addr, mem_go)
 }
 
 /// The bottom notebook: Run I/O console plus the assembler messages list.

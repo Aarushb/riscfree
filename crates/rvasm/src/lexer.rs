@@ -11,6 +11,9 @@ pub enum Tok {
     Ident(String),
     /// Integer literal (decimal, 0x hex, 0b binary) or character literal.
     Int(i64),
+    /// Floating-point literal: `1.5`, `-3.25e2`, `inf`, `nan`. Only the
+    /// `.float`/`.double` directives accept these, matching RARS.
+    Float(f64),
     /// String literal with escapes already applied.
     Str(String),
     Comma,
@@ -62,14 +65,14 @@ pub fn lex_line(src: &str, pos: SourcePos, diags: &mut Vec<crate::Diagnostic>) -
                 out.push(Token { tok: Tok::Int(v), pos: at });
                 i = next;
             }
-            b'-' | b'+' if i + 1 < bytes.len() && bytes[i + 1].is_ascii_digit() => {
-                let (v, next) = lex_number(bytes, i, at, diags);
-                out.push(Token { tok: Tok::Int(v), pos: at });
+            b'-' | b'+' if i + 1 < bytes.len() && (bytes[i + 1].is_ascii_digit() || is_float_start(&bytes[i + 1..])) => {
+                let (tok, next) = lex_number_or_float(bytes, i, at, diags);
+                out.push(Token { tok, pos: at });
                 i = next;
             }
             c if c.is_ascii_digit() => {
-                let (v, next) = lex_number(bytes, i, at, diags);
-                out.push(Token { tok: Tok::Int(v), pos: at });
+                let (tok, next) = lex_number_or_float(bytes, i, at, diags);
+                out.push(Token { tok, pos: at });
                 i = next;
             }
             c if c.is_ascii_alphabetic() || c == b'_' || c == b'.' || c == b'$' || c == b'%' => {
@@ -194,6 +197,77 @@ fn lex_char(bytes: &[u8], start: usize, pos: SourcePos, diags: &mut Vec<crate::D
     }
 }
 
+/// True when the bytes ahead begin an `inf`/`nan` float literal (a sign is
+/// allowed because the sign arm checks before dispatching).
+fn is_float_start(rest: &[u8]) -> bool {
+    rest.starts_with(b"inf") || rest.starts_with(b"nan")
+}
+
+/// Scan an integer or floating literal. Returns a float token when the text
+/// carries a fraction, an exponent, or is inf/nan; everything else keeps the
+/// integer path (hex/binary included) so existing diagnostics are unchanged.
+fn lex_number_or_float(bytes: &[u8], start: usize, pos: SourcePos, diags: &mut Vec<crate::Diagnostic>) -> (Tok, usize) {
+    let mut i = start;
+    if bytes[i] == b'+' || bytes[i] == b'-' {
+        i += 1;
+    }
+    if is_float_start(&bytes[i..]) {
+        if bytes[i] == b'i' {
+            let v = if bytes[start] == b'-' { f64::NEG_INFINITY } else { f64::INFINITY };
+            return (Tok::Float(v), i + 3);
+        }
+        return (Tok::Float(f64::NAN), i + 3);
+    }
+    // Hex/binary literals are always integers; plain decimal digits may
+    // continue into a fraction/exponent.
+    if bytes[i] == b'0' && i + 1 < bytes.len() && ((bytes[i + 1] | 0x20) == b'x' || (bytes[i + 1] | 0x20) == b'b') {
+        let (v, next) = lex_number(bytes, start, pos, diags);
+        return (Tok::Int(v), next);
+    }
+    let digits_start = i;
+    while i < bytes.len() && bytes[i].is_ascii_digit() {
+        i += 1;
+    }
+    let mut is_float = false;
+    if i < bytes.len() && bytes[i] == b'.' {
+        is_float = true;
+        i += 1;
+        while i < bytes.len() && bytes[i].is_ascii_digit() {
+            i += 1;
+        }
+    }
+    if i < bytes.len() && (bytes[i] | 0x20) == b'e' {
+        let mut j = i + 1;
+        if j < bytes.len() && (bytes[j] == b'+' || bytes[j] == b'-') {
+            j += 1;
+        }
+        if j < bytes.len() && bytes[j].is_ascii_digit() {
+            is_float = true;
+            i = j;
+            while i < bytes.len() && bytes[i].is_ascii_digit() {
+                i += 1;
+            }
+        }
+    }
+    if i == digits_start {
+        let text = std::str::from_utf8(&bytes[start..i]).unwrap_or("0");
+        diags.push(crate::Diagnostic::error("E-NUM", format!("invalid number '{text}'"), pos));
+        return (Tok::Int(0), i);
+    }
+    let text = std::str::from_utf8(&bytes[start..i]).unwrap_or("0");
+    if !is_float {
+        let (v, next) = lex_number(bytes, start, pos, diags);
+        return (Tok::Int(v), next);
+    }
+    match text.parse::<f64>() {
+        Ok(v) => (Tok::Float(v), i),
+        Err(_) => {
+            diags.push(crate::Diagnostic::error("E-NUM", format!("invalid number '{text}'"), pos));
+            (Tok::Float(0.0), i)
+        }
+    }
+}
+
 fn lex_number(bytes: &[u8], start: usize, pos: SourcePos, diags: &mut Vec<crate::Diagnostic>) -> (i64, usize) {
     let mut i = start;
     if bytes[i] == b'+' || bytes[i] == b'-' {
@@ -277,6 +351,27 @@ mod tests {
         assert_eq!(toks[1].tok, Tok::Int(5));
         assert_eq!(toks[2].tok, Tok::Int(-3));
         assert!(d.is_empty());
+    }
+
+    #[test]
+    fn float_literals() {
+        let mut d = Vec::new();
+        let toks = lex_line("1.25 -0.5 1.5e-3 2e10 -inf -nan 42", pos(), &mut d);
+        assert!(d.is_empty());
+        assert_eq!(toks[0].tok, Tok::Float(1.25));
+        assert_eq!(toks[1].tok, Tok::Float(-0.5));
+        assert_eq!(toks[2].tok, Tok::Float(1.5e-3));
+        assert_eq!(toks[3].tok, Tok::Float(2e10));
+        assert_eq!(toks[4].tok, Tok::Float(f64::NEG_INFINITY));
+        assert!(matches!(toks[5].tok, Tok::Float(v) if v.is_nan()));
+        assert_eq!(toks[6].tok, Tok::Int(42));
+        // Bare `inf`/`nan` stay identifiers (the .float/.double directive
+        // accepts them as such); only signed forms route through the
+        // number lexer.
+        let mut d = Vec::new();
+        let toks = lex_line("inf nan", pos(), &mut d);
+        assert_eq!(toks[0].tok, Tok::Ident("inf".into()));
+        assert_eq!(toks[1].tok, Tok::Ident("nan".into()));
     }
 
     #[test]

@@ -1,10 +1,12 @@
-//! Instruction definitions and bit encoders for RV32I plus the M extension
-//! (F/D and RV64 land on this table in later phases).
+//! Instruction definitions and bit encoders for RV32I, M, and the F/D
+//! floating-point extensions (RV64 land on this table in later phases).
 
 /// Operand kinds an instruction accepts, in order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OpKind {
     Reg,
+    /// Floating-point register (f0-f31, numeric or ABI name).
+    FReg,
     /// Immediate validated against `Range`.
     Imm(Range),
     /// Two's complement immediate checked to be even and in range.
@@ -22,6 +24,12 @@ pub enum Range {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Format {
     R,
+    /// FP single-source R-type (`fsqrt.s fd, fs1`): the fixed funct7+rs2
+    /// pair packs into the I-type immediate slot at encode time.
+    R2,
+    /// Fused multiply-add: `fmadd fd, fs1, fs2, fs3` with rs3 in the
+    /// funct7 slot and the format bit below it.
+    R4,
     I,
     /// `csrrw rd, csr, rs1` family: the CSR address occupies imm[11:0] and
     /// the source register follows the CSR number in source order.
@@ -32,18 +40,64 @@ pub enum Format {
     J,
 }
 
+/// What an instruction does with its register operands. The assembler uses
+/// this to demand FP vs integer registers per slot; UIs can use it for
+/// disassembly styling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InstrKind {
+    /// Integer instruction (default).
+    Int,
+    /// `fadd.s fd, fs1, fs2` family: three FP registers.
+    FpOp,
+    /// `feq.s rd, fs1, fs2`: integer destination, FP sources.
+    FpCmp,
+    /// `fsqrt.s fd, fs1` / `fcvt.s.d fd, fs1`: two FP registers.
+    FpSingle,
+    /// FP source, integer destination, fixed rs2 (`fcvt.w.s`, `fmv.x.s`,
+    /// `fclass.s`).
+    FpToI,
+    /// Integer source, FP destination, fixed rs2 (`fcvt.s.w`, `fmv.s.x`).
+    FpToX,
+    /// `flw`/`fld`.
+    FpLoad,
+    /// `fsw`/`fsd`.
+    FpStore,
+    /// Fused multiply-add: four FP registers.
+    FpFma,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct InstructionInfo {
     pub name: &'static str,
     pub format: Format,
+    pub kind: InstrKind,
     pub opcode: u32,
     pub funct3: u32,
     pub funct7: u32,
+    /// Fixed rs2 field for the single-source FP forms (e.g. `fcvt.wu.s`
+    /// carries rs2 = 1); unused otherwise.
+    pub rs2_fixed: u8,
 }
 
 impl InstructionInfo {
     const fn new(name: &'static str, format: Format, opcode: u32, funct3: u32, funct7: u32) -> Self {
-        InstructionInfo { name, format, opcode, funct3, funct7 }
+        InstructionInfo { name, format, kind: InstrKind::Int, opcode, funct3, funct7, rs2_fixed: 0 }
+    }
+
+    /// FP instruction: `funct3` is either the operation selector or the
+    /// default rounding mode baked into the encoding (RNE, or RTZ for the
+    /// truncating float→int conversions, matching RARS); `funct7` carries
+    /// the operation plus the format bit (0 = .s, 1 = .d).
+    const fn new_fp(
+        name: &'static str,
+        format: Format,
+        kind: InstrKind,
+        opcode: u32,
+        funct3: u32,
+        funct7: u32,
+        rs2_fixed: u8,
+    ) -> Self {
+        InstructionInfo { name, format, kind, opcode, funct3, funct7, rs2_fixed }
     }
 }
 
@@ -51,6 +105,9 @@ pub const OP: u32 = 0x33;
 pub const OP_IMM: u32 = 0x13;
 pub const LOAD: u32 = 0x03;
 pub const STORE: u32 = 0x23;
+/// FP loads/stores use their own major opcodes, not the integer ones.
+pub const LOAD_FP: u32 = 0x07;
+pub const STORE_FP: u32 = 0x27;
 pub const BRANCH: u32 = 0x63;
 pub const JAL: u32 = 0x6f;
 pub const JALR: u32 = 0x67;
@@ -58,6 +115,14 @@ pub const LUI: u32 = 0x37;
 pub const AUIPC: u32 = 0x17;
 pub const SYSTEM: u32 = 0x73;
 pub const MISC_MEM: u32 = 0x0f;
+/// FP arithmetic/comparison major opcode.
+pub const FP: u32 = 0x53;
+/// Fused multiply-add opcodes, distinguished by the low two major-opcode
+/// bits; the format bit (.s/.d) sits in funct7[0].
+pub const FMADD: u32 = 0x43;
+pub const FMSUB: u32 = 0x47;
+pub const FNMSUB: u32 = 0x4b;
+pub const FNMADD: u32 = 0x4f;
 
 /// RV32I base and M-extension instructions keyed by mnemonic.
 pub static INSTRUCTIONS: &[InstructionInfo] = &[
@@ -116,6 +181,65 @@ pub static INSTRUCTIONS: &[InstructionInfo] = &[
     InstructionInfo::new("csrrwi", Format::Csr, SYSTEM, 5, 0),
     InstructionInfo::new("csrrsi", Format::Csr, SYSTEM, 6, 0),
     InstructionInfo::new("csrrci", Format::Csr, SYSTEM, 7, 0),
+    // ---- FP loads/stores (word and doubleword) ----
+    InstructionInfo::new_fp("flw", Format::I, InstrKind::FpLoad, LOAD_FP, 2, 0, 0),
+    InstructionInfo::new_fp("fsw", Format::S, InstrKind::FpStore, STORE_FP, 2, 0, 0),
+    InstructionInfo::new_fp("fld", Format::I, InstrKind::FpLoad, LOAD_FP, 3, 0, 0),
+    InstructionInfo::new_fp("fsd", Format::S, InstrKind::FpStore, STORE_FP, 3, 0, 0),
+    // ---- Fused multiply-add (R4): funct3 bakes RNE, funct7 the format bit ----
+    InstructionInfo::new_fp("fmadd.s", Format::R4, InstrKind::FpFma, FMADD, 0, 0x00, 0),
+    InstructionInfo::new_fp("fmsub.s", Format::R4, InstrKind::FpFma, FMSUB, 0, 0x00, 0),
+    InstructionInfo::new_fp("fnmsub.s", Format::R4, InstrKind::FpFma, FNMSUB, 0, 0x00, 0),
+    InstructionInfo::new_fp("fnmadd.s", Format::R4, InstrKind::FpFma, FNMADD, 0, 0x00, 0),
+    InstructionInfo::new_fp("fmadd.d", Format::R4, InstrKind::FpFma, FMADD, 0, 0x01, 0),
+    InstructionInfo::new_fp("fmsub.d", Format::R4, InstrKind::FpFma, FMSUB, 0, 0x01, 0),
+    InstructionInfo::new_fp("fnmsub.d", Format::R4, InstrKind::FpFma, FNMSUB, 0, 0x01, 0),
+    InstructionInfo::new_fp("fnmadd.d", Format::R4, InstrKind::FpFma, FNMADD, 0, 0x01, 0),
+    // ---- F arithmetic (funct7 = op<<1 | 0, funct3 bakes RNE or the
+    // selector for the sign-inject/min-max groups) ----
+    InstructionInfo::new_fp("fadd.s", Format::R, InstrKind::FpOp, FP, 0, 0x00, 0),
+    InstructionInfo::new_fp("fsub.s", Format::R, InstrKind::FpOp, FP, 0, 0x04, 0),
+    InstructionInfo::new_fp("fmul.s", Format::R, InstrKind::FpOp, FP, 0, 0x08, 0),
+    InstructionInfo::new_fp("fdiv.s", Format::R, InstrKind::FpOp, FP, 0, 0x0c, 0),
+    InstructionInfo::new_fp("fsgnj.s", Format::R, InstrKind::FpOp, FP, 0, 0x10, 0),
+    InstructionInfo::new_fp("fsgnjn.s", Format::R, InstrKind::FpOp, FP, 1, 0x10, 0),
+    InstructionInfo::new_fp("fsgnjx.s", Format::R, InstrKind::FpOp, FP, 2, 0x10, 0),
+    InstructionInfo::new_fp("fmin.s", Format::R, InstrKind::FpOp, FP, 0, 0x14, 0),
+    InstructionInfo::new_fp("fmax.s", Format::R, InstrKind::FpOp, FP, 1, 0x14, 0),
+    InstructionInfo::new_fp("fsqrt.s", Format::R2, InstrKind::FpSingle, FP, 0, 0x2c, 0),
+    // Truncating float→int conversions bake RTZ in the rm field, as RARS does.
+    InstructionInfo::new_fp("fcvt.w.s", Format::R2, InstrKind::FpToI, FP, 1, 0x60, 0),
+    InstructionInfo::new_fp("fcvt.wu.s", Format::R2, InstrKind::FpToI, FP, 1, 0x60, 1),
+    InstructionInfo::new_fp("fmv.x.s", Format::R2, InstrKind::FpToI, FP, 0, 0x70, 0),
+    InstructionInfo::new_fp("fclass.s", Format::R2, InstrKind::FpToI, FP, 1, 0x70, 0),
+    InstructionInfo::new_fp("fcvt.s.w", Format::R2, InstrKind::FpToX, FP, 0, 0x68, 0),
+    InstructionInfo::new_fp("fcvt.s.wu", Format::R2, InstrKind::FpToX, FP, 0, 0x68, 1),
+    InstructionInfo::new_fp("fmv.s.x", Format::R2, InstrKind::FpToX, FP, 0, 0x78, 0),
+    InstructionInfo::new_fp("feq.s", Format::R, InstrKind::FpCmp, FP, 2, 0x50, 0),
+    InstructionInfo::new_fp("flt.s", Format::R, InstrKind::FpCmp, FP, 1, 0x50, 0),
+    InstructionInfo::new_fp("fle.s", Format::R, InstrKind::FpCmp, FP, 0, 0x50, 0),
+    // ---- D arithmetic (funct7 = op<<1 | 1) ----
+    InstructionInfo::new_fp("fadd.d", Format::R, InstrKind::FpOp, FP, 0, 0x01, 0),
+    InstructionInfo::new_fp("fsub.d", Format::R, InstrKind::FpOp, FP, 0, 0x05, 0),
+    InstructionInfo::new_fp("fmul.d", Format::R, InstrKind::FpOp, FP, 0, 0x09, 0),
+    InstructionInfo::new_fp("fdiv.d", Format::R, InstrKind::FpOp, FP, 0, 0x0d, 0),
+    InstructionInfo::new_fp("fsgnj.d", Format::R, InstrKind::FpOp, FP, 0, 0x11, 0),
+    InstructionInfo::new_fp("fsgnjn.d", Format::R, InstrKind::FpOp, FP, 1, 0x11, 0),
+    InstructionInfo::new_fp("fsgnjx.d", Format::R, InstrKind::FpOp, FP, 2, 0x11, 0),
+    InstructionInfo::new_fp("fmin.d", Format::R, InstrKind::FpOp, FP, 0, 0x15, 0),
+    InstructionInfo::new_fp("fmax.d", Format::R, InstrKind::FpOp, FP, 1, 0x15, 0),
+    InstructionInfo::new_fp("fsqrt.d", Format::R2, InstrKind::FpSingle, FP, 0, 0x2d, 0),
+    InstructionInfo::new_fp("fcvt.w.d", Format::R2, InstrKind::FpToI, FP, 1, 0x61, 0),
+    InstructionInfo::new_fp("fcvt.wu.d", Format::R2, InstrKind::FpToI, FP, 1, 0x61, 1),
+    InstructionInfo::new_fp("fclass.d", Format::R2, InstrKind::FpToI, FP, 1, 0x71, 0),
+    InstructionInfo::new_fp("fcvt.d.w", Format::R2, InstrKind::FpToX, FP, 0, 0x69, 0),
+    InstructionInfo::new_fp("fcvt.d.wu", Format::R2, InstrKind::FpToX, FP, 0, 0x69, 1),
+    InstructionInfo::new_fp("feq.d", Format::R, InstrKind::FpCmp, FP, 2, 0x51, 0),
+    InstructionInfo::new_fp("flt.d", Format::R, InstrKind::FpCmp, FP, 1, 0x51, 0),
+    InstructionInfo::new_fp("fle.d", Format::R, InstrKind::FpCmp, FP, 0, 0x51, 0),
+    // ---- Precision conversions ----
+    InstructionInfo::new_fp("fcvt.s.d", Format::R2, InstrKind::FpSingle, FP, 0, 0x20, 0),
+    InstructionInfo::new_fp("fcvt.d.s", Format::R2, InstrKind::FpSingle, FP, 0, 0x21, 0),
 ];
 
 pub fn lookup(name: &str) -> Option<&'static InstructionInfo> {
@@ -124,6 +248,18 @@ pub fn lookup(name: &str) -> Option<&'static InstructionInfo> {
 
 fn enc_r(info: &InstructionInfo, rd: u32, rs1: u32, rs2: u32) -> u32 {
     (info.funct7 & 0x7f) << 25
+        | (rs2 & 0x1f) << 20
+        | (rs1 & 0x1f) << 15
+        | (info.funct3 & 0x7) << 12
+        | (rd & 0x1f) << 7
+        | info.opcode
+}
+
+/// FMA layout: rs3 rides above rs2 with the format bit (funct7[0]) wedged
+/// between them at bit 25.
+fn enc_r4(info: &InstructionInfo, rd: u32, rs1: u32, rs2: u32, rs3: u32) -> u32 {
+    (rs3 & 0x1f) << 27
+        | (info.funct7 & 0x3) << 25
         | (rs2 & 0x1f) << 20
         | (rs1 & 0x1f) << 15
         | (info.funct3 & 0x7) << 12
@@ -178,6 +314,10 @@ fn enc_j(info: &InstructionInfo, rd: u32, imm: u32) -> u32 {
 pub fn encode(info: &InstructionInfo, ops: &[u32]) -> u32 {
     match info.format {
         Format::R => enc_r(info, ops[0], ops[1], ops[2]),
+        // Single-source FP forms reuse the I-type layout: the fixed
+        // funct7+rs2 pair fills imm[11:0] exactly as slli's shift field does.
+        Format::R2 => enc_i(info, ops[0], ops[1], ((info.funct7 & 0x7f) << 5) | (info.rs2_fixed & 0x1f) as u32),
+        Format::R4 => enc_r4(info, ops[0], ops[1], ops[2], ops[3]),
         // ecall/ebreak are identified by their immediate field (0 or 1);
         // fence's canonical RARS encoding sets the IORW bits.
         Format::I if info.name == "fence" => enc_i(info, 0, 0, 0xff),
@@ -226,10 +366,12 @@ pub mod decode {
     pub fn imm_for(w: u32) -> i32 {
         let opcode = w & 0x7f;
         match opcode {
-            crate::encode::OP_IMM | crate::encode::LOAD | crate::encode::JALR | crate::encode::SYSTEM => {
-                sign_extend(imm_i(w), 12)
-            }
-            crate::encode::STORE => sign_extend(imm_s(w), 12),
+            crate::encode::OP_IMM
+            | crate::encode::LOAD
+            | crate::encode::LOAD_FP
+            | crate::encode::JALR
+            | crate::encode::SYSTEM => sign_extend(imm_i(w), 12),
+            crate::encode::STORE | crate::encode::STORE_FP => sign_extend(imm_s(w), 12),
             crate::encode::BRANCH => sign_extend(imm_b(w), 13),
             crate::encode::LUI | crate::encode::AUIPC => (w & 0xffff_f000) as i32,
             crate::encode::JAL => sign_extend(imm_j(w), 21),
@@ -288,6 +430,65 @@ mod tests {
         // rem a2, a3, a4
         assert_eq!(enc("rem", &[12, 13, 14]), 0x02e6_e633);
         assert_eq!(enc("remu", &[12, 13, 14]), 0x02e6_f633);
+    }
+
+    /// FP register numbers for the golden tests: f0/f1/f2/f3/f4.
+    #[test]
+    fn f_extension_encodings() {
+        // fadd.s f0, f1, f2: funct7 0000000, rm (funct3) 000 = RNE.
+        assert_eq!(enc("fadd.s", &[0, 1, 2]), 0x0020_8053);
+        assert_eq!(enc("fadd.d", &[0, 1, 2]), 0x0220_8053);
+        // fsub.s f1, f2, f3: funct7 0000100.
+        assert_eq!(enc("fsub.s", &[1, 2, 3]), 0x0831_00d3);
+        assert_eq!(enc("fmul.d", &[1, 2, 3]), 0x1231_00d3);
+        assert_eq!(enc("fdiv.d", &[1, 2, 3]), 0x1a31_00d3);
+        // Sign-inject and min/max use funct3 as the operation selector.
+        assert_eq!(enc("fsgnjn.s", &[3, 1, 2]), 0x2020_91d3);
+        assert_eq!(enc("fsgnjx.d", &[3, 1, 2]), 0x2220_a1d3);
+        assert_eq!(enc("fmin.s", &[3, 1, 2]), 0x2820_81d3);
+        assert_eq!(enc("fmax.d", &[3, 1, 2]), 0x2a20_91d3);
+        // Single-source forms: the fixed funct7+rs2 pair rides in imm[11:0].
+        // fsqrt.s f3, f1: funct7 0101100, rs2 00000, rm 000.
+        assert_eq!(enc("fsqrt.s", &[3, 1]), 0x5800_81d3);
+        assert_eq!(enc("fsqrt.d", &[3, 1]), 0x5a00_81d3);
+        // fcvt.w.s a0, f1: funct7 1100000, rs2 0, rm 001 = RTZ.
+        assert_eq!(enc("fcvt.w.s", &[10, 1]), 0xc000_9553);
+        // fcvt.wu.s a0, f1: same funct7 with rs2 = 1.
+        assert_eq!(enc("fcvt.wu.s", &[10, 1]), 0xc010_9553);
+        assert_eq!(enc("fcvt.w.d", &[10, 1]), 0xc200_9553);
+        assert_eq!(enc("fcvt.wu.d", &[10, 1]), 0xc210_9553);
+        // fmv.x.s a0, f1 and fclass.s a0, f1: funct7 1110000, funct3 0/1.
+        assert_eq!(enc("fmv.x.s", &[10, 1]), 0xe000_8553);
+        assert_eq!(enc("fclass.s", &[10, 1]), 0xe000_9553);
+        assert_eq!(enc("fclass.d", &[10, 1]), 0xe200_9553);
+        // Int→FP forms: fcvt.s.w f1, a0 (funct7 1101000) and fmv.s.x f1, a0
+        // (funct7 1111000, integer source in rs1).
+        assert_eq!(enc("fcvt.s.w", &[1, 10]), 0xd005_00d3);
+        assert_eq!(enc("fcvt.s.wu", &[1, 10]), 0xd015_00d3);
+        assert_eq!(enc("fcvt.d.w", &[1, 10]), 0xd005_00d3 | 0x0200_0000);
+        assert_eq!(enc("fmv.s.x", &[1, 10]), 0xf005_00d3);
+        // Comparisons write an integer register.
+        assert_eq!(enc("feq.s", &[10, 1, 2]), 0xa020_a553);
+        assert_eq!(enc("flt.s", &[10, 1, 2]), 0xa020_9553);
+        assert_eq!(enc("fle.d", &[10, 1, 2]), 0xa220_8553);
+        // Precision conversions between .s and .d.
+        assert_eq!(enc("fcvt.s.d", &[3, 1]), 0x4000_81d3);
+        assert_eq!(enc("fcvt.d.s", &[3, 1]), 0x4200_81d3);
+    }
+
+    #[test]
+    fn fma_and_fp_load_store_encodings() {
+        // fmadd.s f3, f1, f2, f4: rs3 in bits 31:27, format bit 0 at bit 25.
+        assert_eq!(enc("fmadd.s", &[3, 1, 2, 4]), 0x2020_81c3);
+        assert_eq!(enc("fmsub.s", &[3, 1, 2, 4]), 0x2020_81c7);
+        assert_eq!(enc("fnmsub.s", &[3, 1, 2, 4]), 0x2020_81cb);
+        // fnmadd.d: opcode 1001111 plus format bit 1 at bit 25.
+        assert_eq!(enc("fnmadd.d", &[3, 1, 2, 4]), 0x2220_81cf);
+        // FP loads/stores use the LOAD-FP/STORE-FP opcodes (0x07/0x27).
+        assert_eq!(enc("flw", &[1, 2, 8]), 0x0081_2087); // flw f1, 8(f2)
+        assert_eq!(enc("fsw", &[2, 1, 8]), 0x0011_2427); // fsw f1, 8(f2)
+        assert_eq!(enc("fld", &[1, 2, 8]), 0x0081_3087);
+        assert_eq!(enc("fsd", &[2, 1, 8]), 0x0011_3427);
     }
 
     #[test]

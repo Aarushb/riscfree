@@ -3,6 +3,7 @@
 //! flows through `Host` and returned events.
 
 mod exec;
+mod fp;
 mod host;
 mod mmio;
 mod memory;
@@ -54,6 +55,8 @@ pub enum Event {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Change {
     Reg { index: usize, old: u64, new: u64 },
+    /// Floating-point register write (raw NaN-boxed bits).
+    FReg { index: usize, old: u64, new: u64 },
     Csr { id: u16, old: u64, new: u64 },
     Mem { addr: u32, old: u64, new: u64, width: u8 },
     Pc { old: u32, new: u32 },
@@ -89,6 +92,7 @@ impl StepOutcome {
 enum Undo {
     Boundary,
     Reg { index: usize, old: u64 },
+    FReg { index: usize, old: u64 },
     Csr { id: u16, old: u64 },
     Mem { addr: u32, old: u64, width: u8 },
     Pc { old: u32 },
@@ -171,6 +175,24 @@ pub mod csr {
     pub fn is_read_only(id: u16) -> bool {
         matches!(id, CYCLE | TIME | INSTRET | CYCLEH | TIMEH | INSTRETH)
     }
+
+    /// fflags/frm/fcsr alias each other; writes resync all three.
+    pub fn is_fp_control(id: u16) -> bool {
+        matches!(id, FFLAGS | FRM | FCSR)
+    }
+}
+
+/// Interpret an FP register word as a single-precision value under the
+/// NaN-boxing rule (a word whose upper 32 bits are not all ones reads as the
+/// canonical NaN). Register-file views can pair this with
+/// `rvasm::abi_freg_name` for column headers.
+pub fn f32_of_freg(bits: u64) -> f32 {
+    f32::from_bits(fp::single_bits(bits))
+}
+
+/// Interpret an FP register word as a double-precision value.
+pub fn f64_of_freg(bits: u64) -> f64 {
+    f64::from_bits(bits)
 }
 
 impl Machine {
@@ -223,9 +245,7 @@ impl Machine {
 
     pub fn freg(&self, index: usize) -> u64 {
         self.fregs[index]
-    }
-
-    pub fn csr(&self, id: u16) -> u64 {
+    }    pub fn csr(&self, id: u16) -> u64 {
         match id {
             // Sequential model: cycle tracks instret; time is cached by the
             // time syscall when programs read it.
@@ -376,6 +396,9 @@ impl Machine {
                         self.regs[index] = old;
                     }
                 }
+                Undo::FReg { index, old } => {
+                    self.fregs[index] = old;
+                }
                 Undo::Csr { id, old } => {
                     self.csrs.insert(id, old);
                 }
@@ -444,14 +467,61 @@ impl Machine {
         changes.push(Change::Reg { index, old, new: value });
     }
 
+    pub(crate) fn write_freg(&mut self, index: usize, value: u64, changes: &mut Vec<Change>) {
+        let old = self.fregs[index];
+        self.journal.push(Undo::FReg { index, old });
+        self.fregs[index] = value;
+        changes.push(Change::FReg { index, old, new: value });
+    }
+
+    /// OR exception bits into fflags, the way FP instructions accumulate
+    /// them. Each write lands in the journal so backstep strips the flags.
+    pub(crate) fn acc_fflags(&mut self, flags: u8, changes: &mut Vec<Change>) {
+        if flags == 0 {
+            return;
+        }
+        let old = self.read_csr(csr::FFLAGS);
+        self.write_csr_raw(csr::FFLAGS, (old | flags as u64) & 0x1f, changes);
+    }
+
     pub(crate) fn write_csr_raw(&mut self, id: u16, value: u64, changes: &mut Vec<Change>) {
         if csr::is_read_only(id) {
+            return;
+        }
+        // The FP control CSRs alias: fcsr = frm << 5 | fflags. Writing any
+        // one of them resyncs the others so reads stay consistent.
+        if csr::is_fp_control(id) {
+            self.write_fp_csr(id, value, changes);
             return;
         }
         let old = self.csrs.get(&id).copied().unwrap_or(0);
         self.journal.push(Undo::Csr { id, old });
         self.csrs.insert(id, value);
         changes.push(Change::Csr { id, old, new: value });
+    }
+
+    fn write_fp_csr(&mut self, id: u16, value: u64, changes: &mut Vec<Change>) {
+        let mut fflags = self.read_csr(csr::FFLAGS);
+        let mut frm = self.read_csr(csr::FRM);
+        match id {
+            csr::FFLAGS => fflags = value & 0x1f,
+            csr::FRM => frm = value & 0x7,
+            _ => {
+                // fcsr carries both fields.
+                fflags = value & 0x1f;
+                frm = (value >> 5) & 0x7;
+            }
+        }
+        let fcsr = (frm << 5) | fflags;
+        for (csr_id, v) in [(csr::FFLAGS, fflags), (csr::FRM, frm), (csr::FCSR, fcsr)] {
+            let old = self.csrs.get(&csr_id).copied().unwrap_or(0);
+            if old == v {
+                continue;
+            }
+            self.journal.push(Undo::Csr { id: csr_id, old });
+            self.csrs.insert(csr_id, v);
+            changes.push(Change::Csr { id: csr_id, old, new: v });
+        }
     }
 
     pub(crate) fn read_csr(&self, id: u16) -> u64 {
@@ -483,7 +553,9 @@ impl Machine {
         let val = match width {
             1 => buf[0] as u64,
             2 => u16::from_le_bytes([buf[0], buf[1]]) as u64,
-            _ => u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]) as u64,
+            4 => u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]) as u64,
+            // fld moves a full doubleword into an FP register.
+            _ => u64::from_le_bytes(buf),
         };
         changes.push(Change::Mem { addr, old: 0, new: val, width: width as u8 });
         Ok(val)

@@ -14,6 +14,9 @@ const MACRO_DEPTH_LIMIT: u32 = 32;
 #[derive(Debug, Clone)]
 enum Operand {
     Reg(u8),
+    /// Floating-point register (flw/fsw/F ops); keeps FP names rendering
+    /// correctly and lets encode_one reject mixed register classes.
+    FReg(u8),
     Imm(i64),
     /// Label reference, resolved to an absolute address in pass 2.
     Sym(String),
@@ -428,10 +431,19 @@ impl Assembler {
                     (Operand::Imm(0), i + 1)
                 }
             },
-            Tok::Ident(name) => match reg_by_name(name) {
-                Some(r) => (Operand::Reg(r), i + 1),
-                None => (Operand::Sym(name.clone()), i + 1),
-            },
+            Tok::Ident(name) => {
+                if let Some(r) = reg_by_name(name) {
+                    (Operand::Reg(r), i + 1)
+                } else if let Some(r) = freg_by_name(name) {
+                    (Operand::FReg(r), i + 1)
+                } else {
+                    (Operand::Sym(name.clone()), i + 1)
+                }
+            }
+            Tok::Float(_) => {
+                self.err("E-OPERAND", "a floating-point literal is only valid in .float/.double", t.pos);
+                (Operand::Imm(0), i + 1)
+            }
             _ => {
                 self.err("E-OPERAND", "expected a register, immediate, label, or offset(base)", t.pos);
                 (Operand::Imm(0), i + 1)
@@ -589,7 +601,42 @@ impl Assembler {
             // how RARS treats .section.
             ".section" => {}
             ".float" | ".double" => {
-                self.err("E-UNSUPPORTED", format!("{d} lands with floating point support (phase 2)"), pos)
+                if self.segment != Segment::Data {
+                    self.err("E-DIRECTIVE", format!("{d} must appear inside .data"), pos);
+                }
+                let width = if d == ".float" { 4usize } else { 8 };
+                let mut j = 0usize;
+                while j < rest.len() {
+                    // Values arrive as float literals; integer literals are
+                    // accepted as exact values (RARS parity).
+                    let v = match &rest[j].tok {
+                        Tok::Float(v) => Some(*v),
+                        Tok::Int(v) => Some(*v as f64),
+                        Tok::Ident(name) => match name.as_str() {
+                            "inf" => Some(f64::INFINITY),
+                            "nan" => Some(f64::NAN),
+                            other => {
+                                self.err("E-DIRECTIVE", format!("unknown float value '{other}'"), rest[j].pos);
+                                None
+                            }
+                        },
+                        Tok::Comma => None,
+                        _ => {
+                            self.err("E-DIRECTIVE", format!("{d} expects floating-point values"), rest[j].pos);
+                            None
+                        }
+                    };
+                    if let Some(v) = v {
+                        let bytes = if width == 4 {
+                            (v as f32).to_bits().to_le_bytes().to_vec()
+                        } else {
+                            v.to_bits().to_le_bytes().to_vec()
+                        };
+                        self.push_data(&bytes);
+                        self.advance(width as u32);
+                    }
+                    j += 1;
+                }
             }
             // Definitions are consumed directly by pass_one; seeing either
             // directive here means it was misplaced.
@@ -611,24 +658,25 @@ impl Assembler {
             self.err("E-SEGMENT", "instructions must appear inside .text", pos);
         }
         if let Some(info) = encode::lookup(mnemonic) {
-            // RARS label-form loads/stores: `lw rd, sym` / `sw rt, sym`.
+            // RARS label-form loads/stores: `lw rd, sym` / `sw rt, sym`, and
+            // the FP forms `flw fd, sym` / `fsw fs, sym`.
+            let fp_mem = matches!(info.kind, encode::InstrKind::FpLoad | encode::InstrKind::FpStore);
             let mem_sym = matches!(ops.last(), Some(Operand::Sym(_)))
                 && matches!(info.format, Format::I | Format::S)
-                && (info.opcode == encode::LOAD || info.opcode == encode::STORE)
+                && (info.opcode == encode::LOAD
+                    || info.opcode == encode::STORE
+                    || info.opcode == encode::LOAD_FP
+                    || info.opcode == encode::STORE_FP)
                 && self.cfg.allow_pseudo;
             if mem_sym {
                 let Operand::Sym(sym) = ops.remove(1) else { unreachable!() };
                 let rd = match ops.first() {
-                    Some(Operand::Reg(r)) => *r,
+                    Some(Operand::Reg(r)) | Some(Operand::FReg(r)) => *r,
                     _ => 0,
                 };
+                let rd_op = if fp_mem { Operand::FReg(rd) } else { Operand::Reg(rd) };
                 self.push_basic("lui", vec![Operand::Reg(1), Operand::HiSym(sym.clone())], pos, pos);
-                self.push_basic(
-                    info.name,
-                    vec![Operand::Reg(rd), Operand::MemLo { sym, base: 1 }],
-                    pos,
-                    pos,
-                );
+                self.push_basic(info.name, vec![rd_op, Operand::MemLo { sym, base: 1 }], pos, pos);
                 return;
             }
             self.raw.push(RawInstr {
@@ -783,6 +831,32 @@ impl Assembler {
                 self.push_basic("auipc", vec![r(6), Operand::HiPcRel(l.clone())], pos, pos);
                 self.push_basic("jalr", vec![r(0), r(6), Operand::LoPcRel(l, auipc_addr)], pos, pos);
             }
+            // FP pseudo-ops via the sign-inject family (canonical GNU/RARS
+            // expansions: xor the sign bit for abs, flip for neg, copy for mv).
+            ("fabs.s", [Operand::FReg(rd), Operand::FReg(rs)]) => {
+                let (rd, rs) = (*rd, *rs);
+                self.push_basic("fsgnjx.s", vec![Operand::FReg(rd), Operand::FReg(rs), Operand::FReg(rs)], pos, pos);
+            }
+            ("fneg.s", [Operand::FReg(rd), Operand::FReg(rs)]) => {
+                let (rd, rs) = (*rd, *rs);
+                self.push_basic("fsgnjn.s", vec![Operand::FReg(rd), Operand::FReg(rs), Operand::FReg(rs)], pos, pos);
+            }
+            ("fmv.s", [Operand::FReg(rd), Operand::FReg(rs)]) => {
+                let (rd, rs) = (*rd, *rs);
+                self.push_basic("fsgnj.s", vec![Operand::FReg(rd), Operand::FReg(rs), Operand::FReg(rs)], pos, pos);
+            }
+            ("fabs.d", [Operand::FReg(rd), Operand::FReg(rs)]) => {
+                let (rd, rs) = (*rd, *rs);
+                self.push_basic("fsgnjx.d", vec![Operand::FReg(rd), Operand::FReg(rs), Operand::FReg(rs)], pos, pos);
+            }
+            ("fneg.d", [Operand::FReg(rd), Operand::FReg(rs)]) => {
+                let (rd, rs) = (*rd, *rs);
+                self.push_basic("fsgnjn.d", vec![Operand::FReg(rd), Operand::FReg(rs), Operand::FReg(rs)], pos, pos);
+            }
+            ("fmv.d", [Operand::FReg(rd), Operand::FReg(rs)]) => {
+                let (rd, rs) = (*rd, *rs);
+                self.push_basic("fsgnj.d", vec![Operand::FReg(rd), Operand::FReg(rs), Operand::FReg(rs)], pos, pos);
+            }
             (name, _) => {
                 self.err(
                     "E-MNEMONIC",
@@ -876,8 +950,16 @@ impl Assembler {
                     instr.source,
                 );
             }
-            let Operand::Reg(rx) = instr.ops[0] else {
-                return e("E-OPERAND", format!("'{}' expects a register first", info.name), instr.source);
+            let fp_mem = matches!(info.kind, encode::InstrKind::FpLoad | encode::InstrKind::FpStore);
+            let rx = match &instr.ops[0] {
+                Operand::Reg(r) | Operand::FReg(r) => *r,
+                _ => {
+                    return e(
+                        "E-OPERAND",
+                        format!("'{}' expects a register first", info.name),
+                        instr.source,
+                    )
+                }
             };
             let (off, base, off_text) = match spec {
                 MemSpec::Off { off, base } => (off, base, off.to_string()),
@@ -890,14 +972,15 @@ impl Assembler {
             if !(-2048..=2047).contains(&off) {
                 return e("E-IMM", format!("offset {off} does not fit in 12 bits"), instr.source);
             }
+            let rx_text = if fp_mem { abi_freg_name(rx) } else { abi_name(rx) };
             return match info.format {
                 Format::I => Ok((
                     encode::encode(info, &[rx as u32, base as u32, (off as u32) & 0xfff]),
-                    format!("{} {}, {}({})", info.name, abi_name(rx), off_text, abi_name(base)),
+                    format!("{} {}, {}({})", info.name, rx_text, off_text, abi_name(base)),
                 )),
                 Format::S => Ok((
                     encode::encode(info, &[base as u32, rx as u32, (off as u32) & 0xfff]),
-                    format!("{} {}, {}({})", info.name, abi_name(rx), off_text, abi_name(base)),
+                    format!("{} {}, {}({})", info.name, rx_text, off_text, abi_name(base)),
                 )),
                 _ => e(
                     "E-OPERAND",
@@ -907,15 +990,30 @@ impl Assembler {
             };
         }
 
-        let want: &[OpKind] = match info.format {
-            Format::R => &[OpKind::Reg, OpKind::Reg, OpKind::Reg],
-            Format::I if info.opcode == encode::SYSTEM => &[],
-            Format::I => &[OpKind::Reg, OpKind::Reg, OpKind::Imm(Range::I)],
-            Format::Csr => return self.encode_csr(info, instr),
-            Format::S => &[OpKind::Reg, OpKind::Reg, OpKind::Imm(Range::I)],
-            Format::B => &[OpKind::Reg, OpKind::Reg, OpKind::Branch],
-            Format::U => &[OpKind::Reg, OpKind::Imm(Range::U)],
-            Format::J => &[OpKind::Reg, OpKind::Branch],
+        let want: &[OpKind] = match (info.format, info.kind) {
+            // FP register classes per slot: FP ops use FP registers
+            // throughout; comparisons convert to an integer destination and
+            // the fcvt/fmv forms mix the two classes.
+            (Format::R, encode::InstrKind::FpOp) => &[OpKind::FReg, OpKind::FReg, OpKind::FReg],
+            (Format::R, encode::InstrKind::FpCmp) => &[OpKind::Reg, OpKind::FReg, OpKind::FReg],
+            (Format::R2, encode::InstrKind::FpSingle) => &[OpKind::FReg, OpKind::FReg],
+            (Format::R2, encode::InstrKind::FpToI) => &[OpKind::Reg, OpKind::FReg],
+            (Format::R2, encode::InstrKind::FpToX) => &[OpKind::FReg, OpKind::Reg],
+            (Format::R4, encode::InstrKind::FpFma) => {
+                &[OpKind::FReg, OpKind::FReg, OpKind::FReg, OpKind::FReg]
+            }
+            (Format::R, _) => &[OpKind::Reg, OpKind::Reg, OpKind::Reg],
+            (Format::R2, _) => &[OpKind::Reg, OpKind::Reg],
+            (Format::I, encode::InstrKind::FpLoad) => &[OpKind::FReg, OpKind::Reg, OpKind::Imm(Range::I)],
+            (Format::S, encode::InstrKind::FpStore) => &[OpKind::FReg, OpKind::Reg, OpKind::Imm(Range::I)],
+            (Format::I, _) if info.opcode == encode::SYSTEM => &[],
+            (Format::I, _) => &[OpKind::Reg, OpKind::Reg, OpKind::Imm(Range::I)],
+            (Format::Csr, _) => return self.encode_csr(info, instr),
+            (Format::S, _) => &[OpKind::Reg, OpKind::Reg, OpKind::Imm(Range::I)],
+            (Format::R4, _) => &[OpKind::Reg, OpKind::Reg, OpKind::Reg, OpKind::Reg],
+            (Format::B, _) => &[OpKind::Reg, OpKind::Reg, OpKind::Branch],
+            (Format::U, _) => &[OpKind::Reg, OpKind::Imm(Range::U)],
+            (Format::J, _) => &[OpKind::Reg, OpKind::Branch],
         };
         if instr.ops.len() != want.len() {
             return e(
@@ -936,6 +1034,10 @@ impl Assembler {
                 (OpKind::Reg, Operand::Reg(rx)) => {
                     enc_ops.push(*rx as u32);
                     text_ops.push(abi_name(*rx).to_string());
+                }
+                (OpKind::FReg, Operand::FReg(rx)) => {
+                    enc_ops.push(*rx as u32);
+                    text_ops.push(abi_freg_name(*rx).to_string());
                 }
                 (OpKind::Imm(_), Operand::Imm(v)) if shift_imm => {
                     if !(0..=31).contains(v) {
@@ -1133,6 +1235,14 @@ const ABI: &[&str] = &[
     "a6", "a7", "s2", "s3", "s4", "s5", "s6", "s7", "s8", "s9", "s10", "s11", "t3", "t4", "t5", "t6",
 ];
 
+/// FP ABI register names in numeric order (RISC-V calling convention:
+/// ft0-ft7, fs0-fs1, fa0-fa7, fs2-fs11, ft8-ft11).
+const FP_ABI: &[&str] = &[
+    "ft0", "ft1", "ft2", "ft3", "ft4", "ft5", "ft6", "ft7", "fs0", "fs1", "fa0", "fa1", "fa2",
+    "fa3", "fa4", "fa5", "fa6", "fa7", "fs2", "fs3", "fs4", "fs5", "fs6", "fs7", "fs8", "fs9",
+    "fs10", "fs11", "ft8", "ft9", "ft10", "ft11",
+];
+
 /// CSR names from RARS's set, usable as the CSR operand.
 pub fn csr_by_name(name: &str) -> Option<u32> {
     const CSRS: &[(&str, u32)] = &[
@@ -1176,8 +1286,25 @@ pub fn reg_by_name(name: &str) -> Option<u8> {
     ABI.iter().position(|n| *n == name).map(|i| i as u8)
 }
 
+/// Floating-point register names: numeric `f0`-`f31` plus the FP ABI aliases.
+pub fn freg_by_name(name: &str) -> Option<u8> {
+    if let Some(rest) = name.strip_prefix('f') {
+        if let Ok(n) = rest.parse::<u8>() {
+            if n < 32 {
+                return Some(n);
+            }
+        }
+    }
+    FP_ABI.iter().position(|n| *n == name).map(|i| i as u8)
+}
+
 pub fn abi_name(r: u8) -> &'static str {
     ABI[r as usize]
+}
+
+/// ABI name of a floating-point register, for disassembly-style rendering.
+pub fn abi_freg_name(r: u8) -> &'static str {
+    FP_ABI[r as usize]
 }
 
 #[cfg(test)]
@@ -1435,5 +1562,93 @@ mod tests {
         let r = asm(".macro loose\n    nop\n");
         assert!(r.has_errors());
         assert!(r.diagnostics.iter().any(|d| d.code == "E-DIRECTIVE" && d.message.contains(".end_macro")));
+    }
+
+    #[test]
+    fn fp_instructions_assemble_with_f_registers() {
+        let r = asm("fadd.s f0, f1, f2\nfadd.d ft0, ft1, ft2\nfeq.d a0, fa0, fa1\n");
+        assert!(!r.has_errors(), "diags: {:?}", r.diagnostics);
+        let p = r.program.unwrap();
+        // fa0/fa1 are f10/f11, matching the integer a0/a1 numbers:
+        // feq.d x10, f10, f11 = funct7 1010001 | rs2 01011 | rs1 01010
+        assert_eq!(p.statements[0].encoding, 0x0020_8053);
+        assert_eq!(p.statements[1].encoding, 0x0220_8053);
+        assert_eq!(p.statements[2].encoding, 0xa2b5_2553);
+        // The rendered basic text uses FP ABI names.
+        assert_eq!(p.statements[0].basic_text.as_ref(), "fadd.s ft0, ft1, ft2");
+    }
+
+    #[test]
+    fn fp_register_kinds_are_enforced() {
+        // FP ops reject integer registers and vice versa.
+        let r = asm("fadd.s f0, x1, f2\n");
+        assert!(r.has_errors());
+        assert!(r.diagnostics.iter().any(|d| d.code == "E-OPERAND"));
+        let r = asm("add f0, x1, x2\n");
+        assert!(r.has_errors());
+        let r = asm("fcvt.w.s f0, f1\n"); // destination is an integer register
+        assert!(r.has_errors());
+        let r = asm("fmv.s.x f0, f1\n"); // source must be integer
+        assert!(r.has_errors());
+    }
+
+    #[test]
+    fn fp_label_form_load_and_store() {
+        let r = asm(".data\nv: .float 1.5\n.text\nflw f1, v\nfsd f2, w\n.data\nw: .double 2.0\n");
+        assert!(!r.has_errors(), "diags: {:?}", r.diagnostics);
+        let p = r.program.unwrap();
+        assert_eq!(p.statements.len(), 4); // lui+flw, lui+fsd
+        assert_eq!(p.statements[1].basic_text.as_ref(), "flw ft1, %lo(v)(ra)");
+        assert_eq!(p.statements[3].basic_text.as_ref(), "fsd ft2, %lo(w)(ra)");
+    }
+
+    #[test]
+    fn float_double_data_bit_exact() {
+        let r = asm(".data\nf: .float 1.0, -2.5, inf, -inf\n.align 3\nd: .double 1.0, nan, 42\n");
+        assert!(!r.has_errors(), "diags: {:?}", r.diagnostics);
+        let p = r.program.unwrap();
+        let b = &p.data.bytes;
+        assert_eq!(&b[0..4], &1.0f32.to_bits().to_le_bytes());
+        assert_eq!(&b[4..8], &(-2.5f32).to_bits().to_le_bytes());
+        assert_eq!(&b[8..12], &f32::INFINITY.to_bits().to_le_bytes());
+        assert_eq!(&b[12..16], &f32::NEG_INFINITY.to_bits().to_le_bytes());
+        // .double 1.0 lands at the aligned offset 16.
+        assert_eq!(&b[16..24], &1.0f64.to_bits().to_le_bytes());
+        assert!(f64::from_bits(u64::from_le_bytes(b[24..32].try_into().unwrap())).is_nan());
+        // Integer literals are accepted as exact values (42 → 42.0).
+        assert_eq!(&b[32..40], &42.0f64.to_bits().to_le_bytes());
+        assert_eq!(p.symbols.get("f").unwrap().addr, 0x1001_0000);
+        assert_eq!(p.symbols.get("d").unwrap().addr, 0x1001_0010);
+    }
+
+    #[test]
+    fn float_outside_data_is_error() {
+        let r = asm(".text\n.float 1.0\n");
+        assert!(r.has_errors());
+        assert!(r.diagnostics.iter().any(|d| d.code == "E-DIRECTIVE"));
+    }
+
+    #[test]
+    fn fp_pseudo_ops_expand_to_sign_inject() {
+        let r = asm("fabs.s f0, f1\nfneg.s f2, f3\nfmv.s f4, f5\nfabs.d f6, f7\n");
+        assert!(!r.has_errors(), "diags: {:?}", r.diagnostics);
+        let p = r.program.unwrap();
+        // Each pseudo expands to the sign-inject op applied to the same
+        // register twice, matching the canonical GNU/RARS expansions.
+        let enc = |name: &str, ops: &[u32]| {
+            crate::encode::encode(crate::encode::lookup(name).unwrap(), ops)
+        };
+        assert_eq!(p.statements[0].encoding, enc("fsgnjx.s", &[0, 1, 1])); // fabs
+        assert_eq!(p.statements[1].encoding, enc("fsgnjn.s", &[2, 3, 3])); // fneg
+        assert_eq!(p.statements[2].encoding, enc("fsgnj.s", &[4, 5, 5])); // fmv
+        assert_eq!(p.statements[3].encoding, enc("fsgnjx.d", &[6, 7, 7]));
+        // Pin the spec fields: fsgnj funct7 = 0010000(+fmt), and the
+        // selector in funct3 (2 = sgnjx, 1 = sgnjn, 0 = sgnj).
+        let w = p.statements[0].encoding;
+        assert_eq!((w >> 25) & 0x7f, 0x10);
+        assert_eq!((w >> 12) & 0x7, 2);
+        assert_eq!(p.statements[1].encoding >> 12 & 0x7, 1);
+        assert_eq!(p.statements[3].encoding >> 25 & 0x7f, 0x11);
+        assert_eq!(p.statements[0].expanded_from.map(|s| s.line), Some(1));
     }
 }

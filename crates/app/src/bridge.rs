@@ -45,6 +45,7 @@ pub enum Evt {
 
 pub struct StateSnapshot {
     pub regs: [u64; 32],
+    pub fregs: [u64; 32],
     pub pc: u32,
     pub instret: u64,
 }
@@ -233,10 +234,14 @@ fn step_once(m: &mut Machine, events: &Sender<Evt>) {
 
 fn send_state(events: &Sender<Evt>, m: &Machine) {
     let mut regs = [0u64; 32];
+    let mut fregs = [0u64; 32];
     for (i, r) in regs.iter_mut().enumerate() {
         *r = m.reg(i);
     }
+    for (i, r) in fregs.iter_mut().enumerate() {
+        *r = m.freg(i);
+    }
     events
-        .send(Evt::State(Box::new(StateSnapshot { regs, pc: m.pc(), instret: m.instret() })))
+        .send(Evt::State(Box::new(StateSnapshot { regs, fregs, pc: m.pc(), instret: m.instret() })))
         .ok();
 }

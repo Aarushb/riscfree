@@ -4,7 +4,7 @@
 //! its own way later; unknown numbers halt with the same kind of error RARS
 //! produces.
 
-use crate::{Change, Event, Halt, Machine, StepOutcome};
+use crate::{fp, Change, Event, Halt, Machine, StepOutcome};
 
 pub(crate) fn dispatch(m: &mut Machine, events: &mut Vec<Event>, pc_before: u32) -> StepOutcome {
     let code = m.regs[17] as u32; // a7
@@ -89,7 +89,8 @@ fn run_syscall(m: &mut Machine, code: u32, changes: &mut Vec<Change>) -> Result<
             m.host_mut().write_output(&prompt);
             let line = m.host_mut().read_line().unwrap_or_default();
             let v = line.trim().parse::<f32>().unwrap_or(0.0);
-            m.fregs[10] = v.to_bits() as u64;
+            // NaN-box so FP instructions read the value back correctly.
+            m.fregs[10] = fp::box_single(v.to_bits());
         }
         53 => {
             // InputDialogDouble: result in fa0
@@ -233,7 +234,7 @@ fn run_syscall(m: &mut Machine, code: u32, changes: &mut Vec<Change>) -> Result<
         43 => {
             // RandFloat → fa0
             let f = m.host_mut().random_float(a0 as u32);
-            m.fregs[10] = f.to_bits() as u64;
+            m.fregs[10] = fp::box_single(f.to_bits());
         }
         44 => {
             // RandDouble → fa0
