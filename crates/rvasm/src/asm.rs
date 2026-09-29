@@ -690,6 +690,7 @@ impl Assembler {
             Format::R => &[OpKind::Reg, OpKind::Reg, OpKind::Reg],
             Format::I if info.opcode == encode::SYSTEM => &[],
             Format::I => &[OpKind::Reg, OpKind::Reg, OpKind::Imm(Range::I)],
+            Format::Csr => return self.encode_csr(info, instr),
             Format::S => &[OpKind::Reg, OpKind::Reg, OpKind::Imm(Range::I)],
             Format::B => &[OpKind::Reg, OpKind::Reg, OpKind::Branch],
             Format::U => &[OpKind::Reg, OpKind::Imm(Range::U)],
@@ -784,6 +785,59 @@ impl Assembler {
             .map(|s| s.addr)
             .ok_or(("E-UNDEF", format!("undefined symbol '{name}'"), pos))
     }
+
+    /// `csrrw rd, csr, rs1` family. The CSR operand accepts names from the
+    /// RARS CSR set or a number; the final operand is a register, or a
+    /// 5-bit immediate for the `i` variants.
+    fn encode_csr(
+        &self,
+        info: &InstructionInfo,
+        instr: &RawInstr,
+    ) -> Result<(u32, String), (&'static str, String, SourcePos)> {
+        let e = |code: &'static str, msg: String, pos: SourcePos| Err((code, msg, pos));
+        if instr.ops.len() != 3 {
+            return e(
+                "E-OPERAND",
+                format!("'{}' expects 3 operand(s), found {}", info.name, instr.ops.len()),
+                instr.source,
+            );
+        }
+        let Operand::Reg(rd) = instr.ops[0] else {
+            return e("E-OPERAND", format!("'{}' expects a destination register first", info.name), instr.source);
+        };
+        let csr_num = match &instr.ops[1] {
+            // RARS lets a register-style number name the CSR (x0 = 0).
+            Operand::Reg(r) => *r as u32,
+            Operand::Imm(v) if (0..=4095).contains(v) => *v as u32,
+            Operand::Sym(name) => match csr_by_name(name) {
+                Some(n) => n,
+                None => {
+                    return e(
+                        "E-CSR",
+                        format!("unknown CSR '{name}' (use a name like 'uscratch' or 0 to 4095)"),
+                        instr.source,
+                    )
+                }
+            },
+            _ => return e("E-OPERAND", format!("'{}' expects a CSR name or number second", info.name), instr.source),
+        };
+        let immediate_form = info.funct3 >= 5;
+        let third = match (&instr.ops[2], immediate_form) {
+            (Operand::Reg(r), false) => *r as u32,
+            (Operand::Sym(name), false) => match reg_by_name(name) {
+                Some(r) => r as u32,
+                None => return e("E-OPERAND", format!("'{}' expects a source register third", info.name), instr.source),
+            },
+            (Operand::Imm(v), true) if (0..=31).contains(v) => *v as u32,
+            (Operand::Imm(_), true) => {
+                return e("E-IMM", "the immediate form of this CSR instruction takes 0 to 31".into(), instr.source)
+            }
+            _ => return e("E-OPERAND", format!("'{}' expects a register or immediate third", info.name), instr.source),
+        };
+        let word = encode::encode(info, &[rd as u32, csr_num, third]);
+        let third_text = if immediate_form { third.to_string() } else { abi_name(third as u8).to_string() };
+        Ok((word, format!("{} {}, 0x{:03x}, {}", info.name, abi_name(rd), csr_num, third_text)))
+    }
 }
 
 fn int_le(v: i64, width: usize) -> Vec<u8> {
@@ -834,6 +888,30 @@ const ABI: &[&str] = &[
     "zero", "ra", "sp", "gp", "tp", "t0", "t1", "t2", "s0", "s1", "a0", "a1", "a2", "a3", "a4", "a5",
     "a6", "a7", "s2", "s3", "s4", "s5", "s6", "s7", "s8", "s9", "s10", "s11", "t3", "t4", "t5", "t6",
 ];
+
+/// CSR names from RARS's set, usable as the CSR operand.
+pub fn csr_by_name(name: &str) -> Option<u32> {
+    const CSRS: &[(&str, u32)] = &[
+        ("ustatus", 0x000),
+        ("fflags", 0x001),
+        ("frm", 0x002),
+        ("fcsr", 0x003),
+        ("uie", 0x004),
+        ("utvec", 0x005),
+        ("uscratch", 0x040),
+        ("uepc", 0x041),
+        ("ucause", 0x042),
+        ("utval", 0x043),
+        ("uip", 0x044),
+        ("cycle", 0xC00),
+        ("time", 0xC01),
+        ("instret", 0xC02),
+        ("cycleh", 0xC80),
+        ("timeh", 0xC81),
+        ("instreth", 0xC82),
+    ];
+    CSRS.iter().find(|(n, _)| *n == name).map(|(_, v)| *v)
+}
 
 /// Register names, numeric and ABI (RARS accepts both sets).
 pub fn reg_by_name(name: &str) -> Option<u8> {

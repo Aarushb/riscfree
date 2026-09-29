@@ -23,6 +23,9 @@ pub enum Range {
 pub enum Format {
     R,
     I,
+    /// `csrrw rd, csr, rs1` family: the CSR address occupies imm[11:0] and
+    /// the source register follows the CSR number in source order.
+    Csr,
     S,
     B,
     U,
@@ -97,7 +100,13 @@ pub static INSTRUCTIONS: &[InstructionInfo] = &[
     InstructionInfo::new("and", Format::R, OP, 7, 0x00),
     InstructionInfo::new("fence", Format::I, MISC_MEM, 0, 0),
     InstructionInfo::new("ecall", Format::I, SYSTEM, 0, 0),
-    InstructionInfo::new("ebreak", Format::I, SYSTEM, 1, 0),
+    InstructionInfo::new("ebreak", Format::I, SYSTEM, 0, 0),
+    InstructionInfo::new("csrrw", Format::Csr, SYSTEM, 1, 0),
+    InstructionInfo::new("csrrs", Format::Csr, SYSTEM, 2, 0),
+    InstructionInfo::new("csrrc", Format::Csr, SYSTEM, 3, 0),
+    InstructionInfo::new("csrrwi", Format::Csr, SYSTEM, 5, 0),
+    InstructionInfo::new("csrrsi", Format::Csr, SYSTEM, 6, 0),
+    InstructionInfo::new("csrrci", Format::Csr, SYSTEM, 7, 0),
 ];
 
 pub fn lookup(name: &str) -> Option<&'static InstructionInfo> {
@@ -160,12 +169,15 @@ fn enc_j(info: &InstructionInfo, rd: u32, imm: u32) -> u32 {
 pub fn encode(info: &InstructionInfo, ops: &[u32]) -> u32 {
     match info.format {
         Format::R => enc_r(info, ops[0], ops[1], ops[2]),
-        // System instructions (ecall/ebreak) and fence carry all-zero
-        // register fields; fence's canonical RARS encoding sets the IORW
-        // predecessor/successor bits.
+        // ecall/ebreak are identified by their immediate field (0 or 1);
+        // fence's canonical RARS encoding sets the IORW bits.
         Format::I if info.name == "fence" => enc_i(info, 0, 0, 0xff),
-        Format::I if ops.is_empty() => enc_i(info, 0, 0, 0),
+        Format::I if ops.is_empty() => {
+            let imm = u32::from(info.name == "ebreak");
+            enc_i(info, 0, 0, imm)
+        }
         Format::I => enc_i(info, ops[0], ops[1], ops[2]),
+        Format::Csr => enc_i(info, ops[0], ops[2], ops[1]),
         Format::S => enc_s(info, ops[0], ops[1], ops[2]),
         Format::B => enc_b(info, ops[0], ops[1], ops[2]),
         Format::U => enc_u(info, ops[0], ops[1]),
