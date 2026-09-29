@@ -10,6 +10,11 @@ I'm a visually impaired computing science student, and RARS is the simulator my 
 
 In development. Phase 0 (technical spikes on the GUI toolkit, screen reader speech bridge, and the emulator core) is underway; the approved product requirements and technical spec are held locally in `docs/`.
 
+## Documentation
+
+- [Building](docs/BUILDING.md): toolchain setup for the native GUI and speech layers.
+- [Compatibility](docs/COMPAT.md): deliberate behavior differences from RARS.
+
 ## License
 
 [MIT](LICENSE)
