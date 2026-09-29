@@ -24,11 +24,15 @@ pub enum Cmd {
     Reset,
     /// Toggle a breakpoint on a text-segment address.
     SetBreakpoint { addr: u32, on: bool },
+    /// Read len bytes of memory for the data view.
+    ReadMemory { addr: u32, len: u32 },
 }
 
 pub enum Evt {
     /// Program console output (print syscalls and the MMIO transmitter).
     Output(String),
+    /// Response to ReadMemory: the bytes at the requested base.
+    Memory { base: u32, bytes: Vec<u8> },
     /// Full register snapshot; sent after loads, run chunks, and halts.
     /// Boxed because 32 registers dwarf the other variants.
     State(Box<StateSnapshot>),
@@ -164,6 +168,15 @@ pub fn start_sim_thread(cmds: Receiver<Cmd>, events: Sender<Evt>, input: InputCh
                 Cmd::SetBreakpoint { addr, on } => {
                     if let Some(m) = machine.as_mut() {
                         m.set_breakpoint(addr, on);
+                    }
+                }
+                Cmd::ReadMemory { addr, len } => {
+                    if let Some(m) = machine.as_ref() {
+                        let mut bytes = vec![0u8; len as usize];
+                        // Unmapped ranges read as zeros, matching memory
+                        // semantics; no error for view refreshes.
+                        m.peek_bytes(addr, &mut bytes).ok();
+                        events.send(Evt::Memory { base: addr, bytes }).ok();
                     }
                 }
             }

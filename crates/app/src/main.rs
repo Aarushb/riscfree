@@ -62,6 +62,8 @@ struct Shared {
     /// Source position of each row of the assembler messages list, for
     /// Enter-to-jump.
     diagnostic_spans: RefCell<Vec<rvasm::SourcePos>>,
+    /// Base address the Memory tab is viewing.
+    memory_base: RefCell<u32>,
 }
 
 /// Every widget the behavior code needs, kept by handle. wxDragon handles are
@@ -73,6 +75,8 @@ struct Widgets {
     editor: StyledTextCtrl,
     register_list: ListCtrl,
     program_list: ListCtrl,
+    memory_list: ListCtrl,
+    memory_addr: TextCtrl,
     io_output: TextCtrl,
     io_input: TextCtrl,
     messages: ListCtrl,
@@ -135,6 +139,7 @@ fn main() {
             program_path: RefCell::new(None),
             assembled: RefCell::new(None),
             diagnostic_spans: RefCell::new(Vec::new()),
+            memory_base: RefCell::new(0x1001_0000),
         });
         let narrator = Rc::new(Narrator::new());
 
@@ -209,7 +214,7 @@ fn main() {
             .build();
         right_splitter.set_accessibility_label("Right side panes");
 
-        let (register_notebook, register_list, program_list) =
+        let (register_notebook, register_list, program_list, memory_list, memory_addr, memory_go) =
             build_state_views(&right_splitter);
         let (bottom_notebook, io_output, io_input, send_input, messages) =
             build_bottom_views(&right_splitter);
@@ -226,6 +231,8 @@ fn main() {
             editor,
             register_list,
             program_list,
+            memory_list,
+            memory_addr,
             io_output,
             io_input,
             messages,
@@ -278,6 +285,22 @@ fn main() {
             }
         }
 
+        // Memory tab: Go requests the window from the simulation thread.
+        {
+            let w = widgets.clone();
+            let sh = shared.clone();
+            let tx = cmd_tx.clone();
+            memory_go.on_click(move |_| {
+                let text = w.memory_addr.get_value().trim().trim_start_matches("0x").to_string();
+                if let Ok(addr) = u32::from_str_radix(&text, 16) {
+                    *sh.memory_base.borrow_mut() = addr;
+                    tx.send(Cmd::ReadMemory { addr, len: 512 }).ok();
+                } else {
+                    w.status_bar.set_status_text("Memory address must be hexadecimal", 0);
+                }
+            });
+        }
+
         // Program list: Enter toggles a breakpoint on the selected row.
         {
             let w = widgets.clone();
@@ -325,19 +348,46 @@ fn main() {
             let w = widgets.clone();
             let sh = shared.clone();
             let nar = narrator.clone();
+            let tx = cmd_tx.clone();
             frame.on_idle(move |idle| {
                 if let WindowEventData::Idle(idle) = idle {
                     idle.request_more(true);
                 }
                 std::thread::sleep(std::time::Duration::from_millis(5));
                 while let Ok(evt) = evt_rx.try_recv() {
-                    handle_sim_event(&w, &sh, &nar, evt);
+                    handle_sim_event(&w, &sh, &nar, &tx, evt);
                 }
             });
         }
 
         widgets.frame.show(true);
         widgets.frame.centre();
+    });
+}
+
+/// Rebuild the Memory tab rows for one 16-byte-per-row window.
+fn rebuild_memory_rows(base: u32, bytes: &[u8]) {
+    MEMORY_ROWS.with(|rows| {
+        let mut rows = rows.borrow_mut();
+        rows.clear();
+        for (chunk, offset) in bytes.chunks(16).zip((0u32..).step_by(16)) {
+            let hex = chunk
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<Vec<_>>()
+                .join(" ");
+            let ascii: String = chunk
+                .iter()
+                .map(|b| {
+                    if (0x20..0x7f).contains(b) {
+                        *b as char
+                    } else {
+                        '.'
+                    }
+                })
+                .collect();
+            rows.push([format!("0x{:08x}", base + offset), hex, ascii]);
+        }
     });
 }
 
@@ -430,7 +480,13 @@ fn toggle_selected_breakpoint(w: &Widgets, cmd_tx: &Sender<Cmd>) {
     cmd_tx.send(Cmd::SetBreakpoint { addr, on }).ok();
 }
 
-fn handle_sim_event(w: &Widgets, shared: &Shared, narrator: &Narrator, evt: Evt) {
+fn handle_sim_event(
+    w: &Widgets,
+    shared: &Shared,
+    narrator: &Narrator,
+    tx: &Sender<bridge::Cmd>,
+    evt: Evt,
+) {
     match evt {
         Evt::Output(text) => {
             // RARS clear-display (ASCII 12): truncate the transcript at the
@@ -450,6 +506,16 @@ fn handle_sim_event(w: &Widgets, shared: &Shared, narrator: &Narrator, evt: Evt)
             refresh_registers(w, &regs);
             mark_program_pc(w, pc);
             w.status_bar.set_status_text(&format!("pc 0x{pc:08x}, {instret} executed"), 1);
+            let base = *shared.memory_base.borrow();
+            tx.send(Cmd::ReadMemory { addr: base, len: 512 }).ok();
+        }
+        Evt::Memory { base, bytes } => {
+            rebuild_memory_rows(base, &bytes);
+            let count = MEMORY_ROWS.with(|rows| rows.borrow().len() as i64);
+            w.memory_list.set_item_count(count);
+            if count > 0 {
+                w.memory_list.refresh_items(0, count - 1);
+            }
         }
         Evt::Stepped { text, line, changes, pc, instret } => {
             w.status_bar.set_status_text(&format!("line {line}, pc 0x{pc:08x}, {instret} executed"), 1);
@@ -521,6 +587,8 @@ thread_local! {
     static PROGRAM_ROWS: RefCell<Vec<[String; 5]>> = const { RefCell::new(Vec::new()) };
     /// Addresses parallel to PROGRAM_ROWS.
     static PROGRAM_ADDRS: RefCell<Vec<u32>> = const { RefCell::new(Vec::new()) };
+    /// Backing rows for the Memory tab: address, hex bytes, ASCII.
+    static MEMORY_ROWS: RefCell<Vec<[String; 3]>> = const { RefCell::new(Vec::new()) };
 }
 
 const ABI: &[&str] = &[
@@ -595,7 +663,7 @@ fn build_editor(parent: &Panel) -> StyledTextCtrl {
     editor
 }
 
-fn build_state_views(parent: &SplitterWindow) -> (Notebook, ListCtrl, ListCtrl) {
+fn build_state_views(parent: &SplitterWindow) -> (Notebook, ListCtrl, ListCtrl, ListCtrl, TextCtrl, Button) {
     let notebook = Notebook::builder(parent).build();
     notebook.set_accessibility_label("State views");
     #[cfg(target_os = "windows")]
@@ -663,7 +731,51 @@ fn build_state_views(parent: &SplitterWindow) -> (Notebook, ListCtrl, ListCtrl) 
     prog_panel.set_sizer(prog_sizer, true);
     notebook.add_page(&prog_panel, "Program", false, None);
 
-    (notebook, list, prog_list)
+    // Memory tab: a window of memory as hex bytes and ASCII, with a
+    // jump-to-address field. The window base defaults to static data, which
+    // is where course programs put their variables.
+    let mem_panel = Panel::builder(&notebook).build();
+    mem_panel.set_accessibility_label("Memory pane");
+    let mem_sizer = BoxSizer::builder(Orientation::Vertical).build();
+
+    let addr_row = BoxSizer::builder(Orientation::Horizontal).build();
+    let addr_label = StaticText::builder(&mem_panel).with_label("Address (hex):").build();
+    addr_row.add(&addr_label, 0, SizerFlag::AlignCenterVertical | SizerFlag::All, 2);
+    let mem_addr = TextCtrl::builder(&mem_panel).build();
+    mem_addr.set_value("10010000");
+    mem_addr.set_accessibility_label("Memory view address");
+    mem_addr.set_accessibility_description("Hexadecimal address the memory view starts at");
+    addr_row.add(&mem_addr, 1, SizerFlag::Expand | SizerFlag::All, 2);
+    let mem_go = Button::builder(&mem_panel).with_label("Go").build();
+    mem_go.set_accessibility_label("Go to memory address");
+    addr_row.add(&mem_go, 0, SizerFlag::All, 2);
+    mem_sizer.add_sizer(&addr_row, 0, SizerFlag::Expand, 0);
+
+    let mem_list = ListCtrl::builder(&mem_panel)
+        .with_style(ListCtrlStyle::Report | ListCtrlStyle::Virtual | ListCtrlStyle::SingleSel)
+        .build();
+    mem_list.insert_column(0, "Address", ListColumnFormat::Left, 100);
+    mem_list.insert_column(1, "Bytes", ListColumnFormat::Left, 340);
+    mem_list.insert_column(2, "ASCII", ListColumnFormat::Left, 170);
+    mem_list.set_item_count(0);
+    assert!(mem_list.set_virtual_text_callback(move |item, col| {
+        MEMORY_ROWS.with(|rows| {
+            rows.borrow()
+                .get(item as usize)
+                .and_then(|row| row.get(col as usize))
+                .cloned()
+                .unwrap_or_default()
+        })
+    }));
+    mem_list.set_accessibility_label("Memory bytes");
+    mem_list.set_accessibility_description("Memory contents, sixteen bytes per row with ASCII text");
+    #[cfg(target_os = "windows")]
+    mem_list.set_accessibility_role(AccRole::List);
+    mem_sizer.add(&mem_list, 1, SizerFlag::Expand | SizerFlag::All, 2);
+    mem_panel.set_sizer(mem_sizer, true);
+    notebook.add_page(&mem_panel, "Memory", false, None);
+
+    (notebook, list, prog_list, mem_list, mem_addr, mem_go)
 }
 
 /// The bottom notebook: Run I/O console plus the assembler messages list.

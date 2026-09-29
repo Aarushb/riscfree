@@ -73,9 +73,9 @@ fn main() -> ExitCode {
     }
 
     let mut machine = Machine::new(program, Box::new(StdHost::default()), MachineConfig::default());
-    // Program arguments via $a0/$a1 (argc/argv) once the loader table lands;
-    // the spike passes none.
-    let _ = &prog_args;
+    if !prog_args.is_empty() {
+        machine.set_program_args(&prog_args);
+    }
     let events = machine.run(max_steps);
     for e in &events {
         if let Event::Halted(h) = e {
