@@ -14,6 +14,7 @@ In active development, Windows first. Working today: the RV32IM+Zicsr+F/D assemb
 
 - [Building](docs/BUILDING.md): toolchain setup for the native GUI and speech layers.
 - [Compatibility](docs/COMPAT.md): deliberate behavior differences from RARS.
+- [Screen reader checklist](docs/SR-CHECKLIST.md): the manual verification pass every release runs.
 
 ## License
 
