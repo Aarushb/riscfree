@@ -25,3 +25,9 @@ desktop.ini
 # Scratch and local notes
 /scratch/
 *.local.md
+
+# Conversation-scoped planning and research docs: kept local, never tracked
+/docs/PRD.md
+/docs/TECH-SPEC.md
+/docs/research/
+/docs/spikes/

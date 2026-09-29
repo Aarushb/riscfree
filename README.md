@@ -8,7 +8,7 @@ I'm a visually impaired computing science student, and RARS is the simulator my 
 
 ## Status
 
-Research and specification phase. The product requirements and technical spec live in `docs/`; implementation starts after those are reviewed.
+In development. Phase 0 (technical spikes on the GUI toolkit, screen reader speech bridge, and the emulator core) is underway; the approved product requirements and technical spec are held locally in `docs/`.
 
 ## License
 
