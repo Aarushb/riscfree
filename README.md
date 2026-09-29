@@ -8,7 +8,7 @@ I'm a visually impaired computing science student, and RARS is the simulator my 
 
 ## Status
 
-In development. Phase 0 (technical spikes on the GUI toolkit, screen reader speech bridge, and the emulator core) is underway; the approved product requirements and technical spec are held locally in `docs/`.
+In active development, Windows first. Working today: the RV32IM+Zicsr+F/D assembler and machine with macros, MMIO devices, teaching and file syscalls, interrupts and traps, breakpoints with backstep, a headless CLI, and a wxDragon GUI with screen reader narration (NVDA, JAWS, and friends through Prism). Examples live in `examples/asm/`. Remaining toward RARS parity: RV64 mode, the remaining tools, and installer packaging.
 
 ## Documentation
 
