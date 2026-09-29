@@ -6,7 +6,8 @@ use crate::SourcePos;
 #[derive(Debug, Clone, PartialEq)]
 pub enum Tok {
     /// Identifier: mnemonics, directives, register names, labels. RARS-style
-    /// labels may contain `.` and `$`.
+    /// labels may contain `.` and `$`; a leading `%` marks macro parameters
+    /// (and RARS `%hi`-style operator names).
     Ident(String),
     /// Integer literal (decimal, 0x hex, 0b binary) or character literal.
     Int(i64),
@@ -71,7 +72,7 @@ pub fn lex_line(src: &str, pos: SourcePos, diags: &mut Vec<crate::Diagnostic>) -
                 out.push(Token { tok: Tok::Int(v), pos: at });
                 i = next;
             }
-            c if c.is_ascii_alphabetic() || c == b'_' || c == b'.' || c == b'$' => {
+            c if c.is_ascii_alphabetic() || c == b'_' || c == b'.' || c == b'$' || c == b'%' => {
                 let start = i;
                 i += 1;
                 while i < bytes.len() {
@@ -276,6 +277,18 @@ mod tests {
         assert_eq!(toks[1].tok, Tok::Int(5));
         assert_eq!(toks[2].tok, Tok::Int(-3));
         assert!(d.is_empty());
+    }
+
+    #[test]
+    fn percent_starts_parameter_names() {
+        // Macro parameters lex as single identifiers so the expander can
+        // match them textually.
+        let mut d = Vec::new();
+        let toks = lex_line(".macro mvadd(%dst, %src)", pos(), &mut d);
+        assert!(d.is_empty());
+        assert_eq!(toks[2].tok, Tok::LParen);
+        assert_eq!(toks[3].tok, Tok::Ident("%dst".into()));
+        assert_eq!(toks[5].tok, Tok::Ident("%src".into()));
     }
 
     #[test]

@@ -1,5 +1,5 @@
-//! Instruction definitions and bit encoders for RV32I (M/F/D and RV64 land
-//! on this table in later phases).
+//! Instruction definitions and bit encoders for RV32I plus the M extension
+//! (F/D and RV64 land on this table in later phases).
 
 /// Operand kinds an instruction accepts, in order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,7 +59,7 @@ pub const AUIPC: u32 = 0x17;
 pub const SYSTEM: u32 = 0x73;
 pub const MISC_MEM: u32 = 0x0f;
 
-/// RV32I base instructions keyed by mnemonic.
+/// RV32I base and M-extension instructions keyed by mnemonic.
 pub static INSTRUCTIONS: &[InstructionInfo] = &[
     InstructionInfo::new("lui", Format::U, LUI, 0, 0),
     InstructionInfo::new("auipc", Format::U, AUIPC, 0, 0),
@@ -98,6 +98,15 @@ pub static INSTRUCTIONS: &[InstructionInfo] = &[
     InstructionInfo::new("sra", Format::R, OP, 5, 0x20),
     InstructionInfo::new("or", Format::R, OP, 6, 0x00),
     InstructionInfo::new("and", Format::R, OP, 7, 0x00),
+    // RV32M: same R layout, distinguished by funct7 0x01.
+    InstructionInfo::new("mul", Format::R, OP, 0, 0x01),
+    InstructionInfo::new("mulh", Format::R, OP, 1, 0x01),
+    InstructionInfo::new("mulhsu", Format::R, OP, 2, 0x01),
+    InstructionInfo::new("mulhu", Format::R, OP, 3, 0x01),
+    InstructionInfo::new("div", Format::R, OP, 4, 0x01),
+    InstructionInfo::new("divu", Format::R, OP, 5, 0x01),
+    InstructionInfo::new("rem", Format::R, OP, 6, 0x01),
+    InstructionInfo::new("remu", Format::R, OP, 7, 0x01),
     InstructionInfo::new("fence", Format::I, MISC_MEM, 0, 0),
     InstructionInfo::new("ecall", Format::I, SYSTEM, 0, 0),
     InstructionInfo::new("ebreak", Format::I, SYSTEM, 0, 0),
@@ -264,6 +273,21 @@ mod tests {
         // srai x1, x2, 3: raw encode takes the full shifted immediate,
         // funct7 in imm[11:5]
         assert_eq!(enc("srai", &[1, 2, 0x403]), 0x4031_5093);
+    }
+
+    #[test]
+    fn m_extension_encodings() {
+        // mul a0, a1, a2: funct7 0x01 fills instr[31:25]
+        assert_eq!(enc("mul", &[10, 11, 12]), 0x02c5_8533);
+        assert_eq!(enc("mulh", &[10, 11, 12]), 0x02c5_9533);
+        assert_eq!(enc("mulhsu", &[10, 11, 12]), 0x02c5_a533);
+        assert_eq!(enc("mulhu", &[10, 11, 12]), 0x02c5_b533);
+        // div a1, a2, a3: funct3 4 selects signed division
+        assert_eq!(enc("div", &[11, 12, 13]), 0x02d6_45b3);
+        assert_eq!(enc("divu", &[11, 12, 13]), 0x02d6_55b3);
+        // rem a2, a3, a4
+        assert_eq!(enc("rem", &[12, 13, 14]), 0x02e6_e633);
+        assert_eq!(enc("remu", &[12, 13, 14]), 0x02e6_f633);
     }
 
     #[test]

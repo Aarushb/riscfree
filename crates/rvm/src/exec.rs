@@ -1,5 +1,6 @@
-//! Fetch-decode-execute for RV32I. The machine's write helpers record undo
-//! entries and change events, so this file stays a plain decode `match`.
+//! Fetch-decode-execute for RV32I plus the M extension. The machine's write
+//! helpers record undo entries and change events, so this file stays a plain
+//! decode `match`.
 
 use crate::{Change, Event, Halt, Machine, StepOutcome};
 
@@ -201,6 +202,49 @@ pub(crate) fn execute(m: &mut Machine, w: u32, pc_before: u32) -> ExecOutcome {
                 (5, 0x20) => ((a as i64) >> (b & 0x1f)) as u64, // sra
                 (6, 0x00) => a | b,                       // or
                 (7, 0x00) => a & b,                       // and
+                // RV32M: results are 32-bit and stored sign-extended.
+                (0, 0x01) => (a as u32 as i32).wrapping_mul(b as u32 as i32) as i64 as u64, // mul
+                // The signed products fit i64 exactly, so >> 32 is the
+                // exact upper half (arithmetic for mulh/mulhsu).
+                (1, 0x01) => (((a as u32 as i32 as i64) * (b as u32 as i32 as i64)) >> 32) as u64, // mulh
+                (2, 0x01) => (((a as u32 as i32 as i64) * (b as u32 as i64)) >> 32) as u64, // mulhsu
+                (3, 0x01) => ((a as u32 as u64) * (b as u32 as u64)) >> 32, // mulhu
+                // div/rem follow RISC-V's no-trap rules: divide by zero
+                // yields -1 / the dividend, and MIN/-1 overflow yields
+                // MIN / 0 instead of trapping.
+                (4, 0x01) => {
+                    let (x, y) = (a as u32 as i32, b as u32 as i32);
+                    let v: i32 = if y == 0 {
+                        -1
+                    } else if x == i32::MIN && y == -1 {
+                        i32::MIN
+                    } else {
+                        x / y
+                    };
+                    v as i64 as u64
+                }
+                (5, 0x01) => {
+                    let (x, y) = (a as u32, b as u32);
+                    // Divide by zero yields all ones instead of trapping.
+                    let v: u32 = x.checked_div(y).unwrap_or(u32::MAX);
+                    v as i32 as i64 as u64
+                }
+                (6, 0x01) => {
+                    let (x, y) = (a as u32 as i32, b as u32 as i32);
+                    let v: i32 = if y == 0 {
+                        x
+                    } else if x == i32::MIN && y == -1 {
+                        0
+                    } else {
+                        x % y
+                    };
+                    v as i64 as u64
+                }
+                (7, 0x01) => {
+                    let (x, y) = (a as u32, b as u32);
+                    let v: u32 = if y == 0 { x } else { x % y };
+                    v as i32 as i64 as u64
+                }
                 (f, f7) => bail!(format!("invalid op funct3 {f} funct7 {f7}")),
             };
             m.write_reg(rd(w), v, &mut changes);
@@ -331,5 +375,88 @@ target:
         // sltiu sign-extends the immediate then compares unsigned:
         // 1 < 0xffffffff → 1
         assert_eq!(m.reg(14), 1);
+    }
+
+    #[test]
+    fn mul_family() {
+        let src = "\
+    li a0, 7
+    li a1, -3
+    mul a2, a0, a1
+    li t0, 0x10000
+    mulhu a4, t0, t0
+    mulh a5, t0, t0
+    mulhsu a6, a1, t0
+    li t1, -2147483648
+    li t2, -1
+    mulhsu s0, t1, t2
+";
+        let mut m = machine(src);
+        m.run(None);
+        assert_eq!(m.reg(12) as u32 as i32, -21); // mul keeps the low 32 bits
+        assert_eq!(m.reg(14), 1); // mulhu: 0x10000^2 >> 32
+        assert_eq!(m.reg(15), 1); // mulh agrees with mulhu on positive operands
+        // mulhsu(-3, 0x10000): (-3 * 65536) >> 32 floors to -1.
+        assert_eq!(m.reg(16) as u32 as i32, -1);
+        // Exact worst case: i32::MIN * u32::MAX = 0x8000_0000_8000_0000,
+        // so the upper half is i32::MIN itself.
+        assert_eq!(m.reg(8) as u32, 0x8000_0000);
+    }
+
+    #[test]
+    fn mulh_sign_combinations() {
+        let src = "\
+    li a0, 7
+    li a1, -7
+    li a2, 3
+    li a3, -3
+    mulh t0, a0, a2
+    mulh t1, a0, a3
+    mulh t2, a1, a3
+    mulh t3, a1, a2
+";
+        let mut m = machine(src);
+        m.run(None);
+        assert_eq!(m.reg(5), 0); // +7 * +3: high word 0
+        assert_eq!(m.reg(6) as u32 as i32, -1); // +7 * -3: high word all ones
+        assert_eq!(m.reg(7), 0); // -7 * -3: high word 0
+        assert_eq!(m.reg(28) as u32 as i32, -1); // -7 * +3: high word all ones
+    }
+
+    #[test]
+    fn div_rem_edges() {
+        let src = "\
+    li a0, 7
+    li a1, -2
+    div a2, a0, a1
+    rem a3, a0, a1
+    li t0, -2147483648
+    li t1, -1
+    div t3, t0, t1
+    rem t4, t0, t1
+    div a4, a0, zero
+    rem a5, a0, zero
+    divu a6, a0, zero
+    remu a7, a0, zero
+    divu s2, a0, a1
+    remu s3, a0, a1
+";
+        let mut m = machine(src);
+        m.run(None);
+        // 7 / -2 truncates toward zero: q = -3, r = 1, and a == b*q + r.
+        let (q, r) = ((m.reg(12) as u32 as i32), (m.reg(13) as u32 as i32));
+        assert_eq!((q, r), (-3, 1));
+        assert_eq!(7, (-2i32).wrapping_mul(q).wrapping_add(r));
+        // i32::MIN / -1 overflows back to i32::MIN; the matching remainder is 0.
+        assert_eq!(m.reg(28) as u32, 0x8000_0000);
+        assert_eq!(m.reg(29), 0);
+        // Divide by zero never traps: quotient -1, remainder is the dividend.
+        assert_eq!(m.reg(14), u64::MAX); // div: -1, stored sign-extended
+        assert_eq!(m.reg(15), 7); // rem: rs1 passes through
+        assert_eq!(m.reg(16), u64::MAX); // divu: 0xffffffff, sign-extended
+        assert_eq!(m.reg(17), 7); // remu: rs1's low 32 bits
+        // Unsigned view of -2 is 0xfffffffe, which swallows the small dividend.
+        assert_eq!(m.reg(18), 0); // divu: 7 / 0xfffffffe = 0
+        assert_eq!(m.reg(19), 7); // remu: 7 % 0xfffffffe = 7
     }
 }

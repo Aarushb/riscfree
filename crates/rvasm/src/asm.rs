@@ -4,7 +4,12 @@ use crate::encode::{self, Format, InstructionInfo, OpKind, Range};
 use crate::lexer::{lex_line, Tok, Token};
 use crate::{AsmConfig, AsmResult, DataImage, Diagnostic, InputFile, Program, SourcePos, Statement, Symbol, SymbolTable};
 use std::collections::{BTreeMap, HashSet};
+use std::iter::Peekable;
 use std::sync::Arc;
+
+/// Maximum nesting of macro expansions; deeper chains report E-MACRO-DEPTH
+/// instead of exhausting the stack.
+const MACRO_DEPTH_LIMIT: u32 = 32;
 
 #[derive(Debug, Clone)]
 enum Operand {
@@ -42,6 +47,14 @@ enum Segment {
     Data,
 }
 
+/// A `.macro` definition: parameters carry their leading `%`, and the body
+/// is kept as raw token lines, substituted at call time.
+#[derive(Debug, Clone)]
+struct MacroDef {
+    params: Vec<String>,
+    body: Vec<Vec<Token>>,
+}
+
 struct Assembler {
     cfg: AsmConfig,
     diags: Vec<Diagnostic>,
@@ -57,6 +70,13 @@ struct Assembler {
     segment: Segment,
     /// `.eqv` name to replacement tokens.
     equates: BTreeMap<String, Vec<Tok>>,
+    /// `.macro` name to definition, collected during pass one.
+    macros: BTreeMap<String, MacroDef>,
+    /// Current macro expansion nesting.
+    macro_depth: u32,
+    /// Set when the depth limit aborts an expansion so enclosing frames
+    /// stop emitting instead of piling on duplicate errors.
+    macro_abort: bool,
 }
 
 pub fn assemble_impl(files: &[InputFile], cfg: &AsmConfig) -> AsmResult {
@@ -74,6 +94,9 @@ pub fn assemble_impl(files: &[InputFile], cfg: &AsmConfig) -> AsmResult {
         data_addr: cfg.data_base,
         segment: Segment::Text,
         equates: BTreeMap::new(),
+        macros: BTreeMap::new(),
+        macro_depth: 0,
+        macro_abort: false,
     };
 
     for (file_id, f) in files.iter().enumerate() {
@@ -114,14 +137,200 @@ impl Assembler {
     }
 
     fn pass_one(&mut self, file: &InputFile, file_id: usize) {
-        for (line_idx, line) in file.source.lines().enumerate() {
+        // Peekable so `.macro` can swallow whole raw lines up to
+        // `.end_macro` before normal per-line parsing resumes.
+        let mut lines = file.source.lines().enumerate().peekable();
+        while let Some((line_idx, line)) = lines.next() {
             let pos = SourcePos { file: file_id, line: line_idx as u32 + 1, col: 0 };
-            let mut toks = lex_line(line, pos, &mut self.diags);
+            let toks = lex_line(line, pos, &mut self.diags);
+            if matches!(toks.first().map(|t| &t.tok), Some(Tok::Ident(d)) if d == ".macro") {
+                self.collect_macro(&mut lines, toks);
+                continue;
+            }
+            let mut toks = toks;
             self.substitute_equates(&mut toks);
             if toks.is_empty() {
                 continue;
             }
             self.parse_line(toks);
+        }
+    }
+
+    /// Gather a `.macro` definition, consuming raw source lines up to the
+    /// matching `.end_macro`. Body lines are lexed but otherwise untouched:
+    /// parameters are substituted when the macro is called. Nested `.macro`
+    /// definitions are rejected, and everything up to the outer `.end_macro`
+    /// is skipped so the rest of the file still assembles.
+    fn collect_macro<'a, I>(&mut self, lines: &mut Peekable<I>, header: Vec<Token>)
+    where
+        I: Iterator<Item = (usize, &'a str)>,
+    {
+        let pos = header[0].pos;
+        let parsed = self.macro_header(&header[1..], pos);
+        let mut body: Vec<Vec<Token>> = Vec::new();
+        let mut nested = 0u32;
+        let mut discard = parsed.is_none();
+        loop {
+            let Some((line_idx, line)) = lines.next() else {
+                self.err("E-DIRECTIVE", "'.macro' is missing its .end_macro", pos);
+                return;
+            };
+            let lpos = SourcePos { file: pos.file, line: line_idx as u32 + 1, col: 0 };
+            let toks = lex_line(line, lpos, &mut self.diags);
+            match toks.first().map(|t| &t.tok) {
+                Some(Tok::Ident(d)) if d == ".macro" => {
+                    if nested == 0 {
+                        discard = true;
+                        self.err("E-UNSUPPORTED", "nested macros are not supported", lpos);
+                    }
+                    nested += 1;
+                }
+                Some(Tok::Ident(d)) if d == ".end_macro" => {
+                    if nested == 0 {
+                        break;
+                    }
+                    nested -= 1;
+                }
+                _ => {}
+            }
+            if !discard {
+                body.push(toks);
+            }
+        }
+        if let Some((name, params)) = parsed {
+            self.macros.insert(name, MacroDef { params, body });
+        }
+    }
+
+    /// Parse what follows `.macro` on the header line: a name and a
+    /// comma-separated parameter list, inside optional parentheses.
+    fn macro_header(&mut self, rest: &[Token], pos: SourcePos) -> Option<(String, Vec<String>)> {
+        let Some(Token { tok: Tok::Ident(name), .. }) = rest.first() else {
+            self.err("E-DIRECTIVE", ".macro needs a name", pos);
+            return None;
+        };
+        let name = name.clone();
+        let mut params = Vec::new();
+        let mut j = 1usize;
+        if rest.get(j).map(|t| &t.tok) == Some(&Tok::LParen) {
+            j += 1;
+            loop {
+                match rest.get(j).map(|t| &t.tok) {
+                    Some(Tok::Ident(p)) if p.starts_with('%') => {
+                        params.push(p.clone());
+                        j += 1;
+                        match rest.get(j).map(|t| &t.tok) {
+                            Some(Tok::Comma) => j += 1,
+                            Some(Tok::RParen) => {
+                                j += 1;
+                                break;
+                            }
+                            _ => {
+                                self.err("E-DIRECTIVE", "expected ',' or ')' in the .macro parameter list", pos);
+                                return None;
+                            }
+                        }
+                    }
+                    Some(Tok::RParen) => {
+                        j += 1;
+                        break;
+                    }
+                    _ => {
+                        self.err("E-DIRECTIVE", "macro parameters start with '%'", pos);
+                        return None;
+                    }
+                }
+            }
+        } else {
+            while j < rest.len() {
+                match &rest[j].tok {
+                    Tok::Ident(p) if p.starts_with('%') => params.push(p.clone()),
+                    Tok::Comma => {}
+                    _ => {
+                        self.err("E-DIRECTIVE", "macro parameters start with '%'", pos);
+                        return None;
+                    }
+                }
+                j += 1;
+            }
+        }
+        if j < rest.len() {
+            self.err("E-DIRECTIVE", "unexpected tokens after the .macro parameter list", pos);
+            return None;
+        }
+        Some((name, params))
+    }
+
+    /// Split a macro call's `(arg1, arg2)` into top-level comma-separated
+    /// token sequences. Nested parentheses stay inside their argument.
+    fn parse_macro_args(&mut self, toks: &[Token], name: &str, pos: SourcePos) -> Vec<Vec<Token>> {
+        let mut args: Vec<Vec<Token>> = vec![Vec::new()];
+        let mut depth = 1usize;
+        for (k, t) in toks.iter().enumerate() {
+            match t.tok {
+                Tok::LParen => {
+                    depth += 1;
+                    args.last_mut().expect("always at least one arg").push(t.clone());
+                }
+                Tok::RParen => {
+                    depth -= 1;
+                    if depth == 0 {
+                        if k + 1 != toks.len() {
+                            self.err("E-SYNTAX", "unexpected tokens after the macro call", toks[k + 1].pos);
+                        }
+                        // `name()` is a zero-argument call, not one empty one.
+                        if args.len() == 1 && args[0].is_empty() {
+                            args.clear();
+                        }
+                        return args;
+                    }
+                    args.last_mut().expect("always at least one arg").push(t.clone());
+                }
+                Tok::Comma if depth == 1 => args.push(Vec::new()),
+                _ => args.last_mut().expect("always at least one arg").push(t.clone()),
+            }
+        }
+        self.err("E-SYNTAX", format!("macro call '{name}' is missing ')'"), pos);
+        args
+    }
+
+    /// Expand a call to a defined macro: substitute each `%param` token
+    /// with its argument's tokens, then run the body lines through the
+    /// normal line processing so labels, directives, and instructions all
+    /// work, including calls to other macros.
+    fn expand_macro(&mut self, name: &str, args: Vec<Vec<Token>>, pos: SourcePos) {
+        if self.macro_depth >= MACRO_DEPTH_LIMIT {
+            self.err(
+                "E-MACRO-DEPTH",
+                format!("macro expansion of '{name}' nested deeper than {MACRO_DEPTH_LIMIT}"),
+                pos,
+            );
+            self.macro_abort = true;
+            return;
+        }
+        let Some(def) = self.macros.get(name).cloned() else { return };
+        if args.len() != def.params.len() {
+            self.err(
+                "E-OPERAND",
+                format!("macro '{name}' expects {} parameter(s), found {}", def.params.len(), args.len()),
+                pos,
+            );
+            return;
+        }
+        self.macro_depth += 1;
+        for line in &def.body {
+            let mut toks = substitute_params(line, &def.params, &args);
+            self.substitute_equates(&mut toks);
+            if !toks.is_empty() {
+                self.parse_line(toks);
+            }
+            if self.macro_abort {
+                break;
+            }
+        }
+        self.macro_depth -= 1;
+        if self.macro_depth == 0 {
+            self.macro_abort = false;
         }
     }
 
@@ -168,8 +377,17 @@ impl Assembler {
         match &t.tok {
             Tok::Ident(d) if d.starts_with('.') => self.directive(d, &toks[i + 1..], t.pos),
             Tok::Ident(mnemonic) => {
-                let ops = self.parse_operands(&toks[i + 1..]);
-                self.instruction(mnemonic, ops, t.pos);
+                // `name(...)` for a defined macro expands; unknown names
+                // keep the ordinary instruction path and its E-MNEMONIC.
+                if matches!(toks.get(i + 1).map(|t| &t.tok), Some(Tok::LParen))
+                    && self.macros.contains_key(mnemonic)
+                {
+                    let args = self.parse_macro_args(&toks[i + 2..], mnemonic, t.pos);
+                    self.expand_macro(mnemonic, args, t.pos);
+                } else {
+                    let ops = self.parse_operands(&toks[i + 1..]);
+                    self.instruction(mnemonic, ops, t.pos);
+                }
             }
             _ => self.err("E-SYNTAX", "expected an instruction or directive", t.pos),
         }
@@ -373,7 +591,10 @@ impl Assembler {
             ".float" | ".double" => {
                 self.err("E-UNSUPPORTED", format!("{d} lands with floating point support (phase 2)"), pos)
             }
-            ".macro" | ".end_macro" => self.err("E-UNSUPPORTED", "macros land in phase 1", pos),
+            // Definitions are consumed directly by pass_one; seeing either
+            // directive here means it was misplaced.
+            ".macro" => self.err("E-DIRECTIVE", "'.macro' must be the first token on its line", pos),
+            ".end_macro" => self.err("E-DIRECTIVE", "'.end_macro' without a matching .macro", pos),
             ".include" => self.err("E-UNSUPPORTED", ".include lands in phase 1", pos),
             ".extern" => self.err("E-UNSUPPORTED", ".extern lands in phase 1", pos),
             other => self.err("E-DIRECTIVE", format!("unknown directive '{other}'"), pos),
@@ -848,6 +1069,29 @@ fn int_le(v: i64, width: usize) -> Vec<u8> {
     }
 }
 
+/// Textual parameter substitution: every body token whose text equals a
+/// `%param` is replaced by that argument's token sequence; other tokens pass
+/// through untouched. Substituted tokens keep the parameter's position so
+/// diagnostics point at the offending argument slot.
+fn substitute_params(line: &[Token], params: &[String], args: &[Vec<Token>]) -> Vec<Token> {
+    let mut out = Vec::with_capacity(line.len());
+    for t in line {
+        let Tok::Ident(text) = &t.tok else {
+            out.push(t.clone());
+            continue;
+        };
+        match params.iter().position(|p| p == text).and_then(|k| args.get(k)) {
+            Some(arg) => {
+                for a in arg {
+                    out.push(Token { tok: a.tok.clone(), pos: t.pos });
+                }
+            }
+            None => out.push(t.clone()),
+        }
+    }
+    out
+}
+
 fn check_imm(range: Range, v: i64) -> Result<u32, String> {
     match range {
         Range::I => {
@@ -1107,5 +1351,89 @@ mod tests {
         let p = r.program.unwrap();
         assert_eq!(p.statements.len(), 2);
         assert_eq!(p.statements[1].basic_text.as_ref(), "lw a0, %lo(v)(ra)");
+    }
+
+    #[test]
+    fn macro_with_two_params() {
+        let r = asm(
+            ".macro loadpair(%a, %b)\n    addi %a, %b, 1\n    addi %a, %a, 2\n.end_macro\nloadpair(a0, a1)\n",
+        );
+        assert!(!r.has_errors(), "diags: {:?}", r.diagnostics);
+        let p = r.program.unwrap();
+        assert_eq!(p.statements.len(), 2);
+        assert_eq!(p.statements[0].encoding, 0x0015_8513); // addi a0, a1, 1
+        assert_eq!(p.statements[1].encoding, 0x0025_0513); // addi a0, a0, 2
+    }
+
+    #[test]
+    fn macro_params_without_parens() {
+        let r = asm(".macro bump %r, %n\n    addi %r, %r, %n\n.end_macro\nbump(sp, 8)\n");
+        assert!(!r.has_errors(), "diags: {:?}", r.diagnostics);
+        let p = r.program.unwrap();
+        assert_eq!(p.statements[0].encoding, 0x0081_0113); // addi sp, sp, 8
+    }
+
+    #[test]
+    fn macro_arity_mismatch_is_error() {
+        let r = asm(".macro pair(%a, %b)\n    add %a, %b, zero\n.end_macro\npair(a0)\n");
+        assert!(r.has_errors());
+        assert!(r.diagnostics.iter().any(|d| d.code == "E-OPERAND" && d.message.contains("pair")));
+    }
+
+    #[test]
+    fn macro_calls_macro() {
+        let r = asm(
+            ".macro inner(%r)\n    addi %r, %r, 4\n.end_macro\n\
+             .macro outer(%r)\n    inner(%r)\n    addi %r, %r, 1\n.end_macro\nouter(a0)\n",
+        );
+        assert!(!r.has_errors(), "diags: {:?}", r.diagnostics);
+        let p = r.program.unwrap();
+        assert_eq!(p.statements.len(), 2);
+        assert_eq!(p.statements[0].encoding, 0x0045_0513); // addi a0, a0, 4
+        assert_eq!(p.statements[1].encoding, 0x0015_0513); // addi a0, a0, 1
+    }
+
+    #[test]
+    fn macro_recursion_hits_depth_cap() {
+        let r = asm(".macro spin\n    spin()\n.end_macro\nspin()\n");
+        assert!(r.has_errors());
+        let hits = r.diagnostics.iter().filter(|d| d.code == "E-MACRO-DEPTH").count();
+        assert_eq!(hits, 1, "depth abort should stop the chain instead of erroring per frame");
+    }
+
+    #[test]
+    fn unknown_macro_call_keeps_mnemonic_error() {
+        let r = asm("nosuch(a0, a1)\n");
+        assert!(r.has_errors());
+        assert!(r.diagnostics.iter().any(|d| d.code == "E-MNEMONIC" && d.message.contains("nosuch")));
+    }
+
+    #[test]
+    fn eqv_inside_macro_body() {
+        // .eqv applies at expansion time and sticks for later lines too.
+        let r = asm(".macro setv(%r)\n    .eqv VAL 9\n    li %r, VAL\n.end_macro\nsetv(a0)\nli a1, VAL\n");
+        assert!(!r.has_errors(), "diags: {:?}", r.diagnostics);
+        let p = r.program.unwrap();
+        assert_eq!(p.statements[0].encoding, 0x0090_0513); // addi a0, zero, 9
+        assert_eq!(p.statements[1].encoding, 0x0090_0593); // addi a1, zero, 9
+    }
+
+    #[test]
+    fn macro_body_with_label() {
+        let r = asm(
+            ".macro skipnext\n    beq zero, zero, done\n    addi zero, zero, 1\ndone:\n.end_macro\nskipnext()\n",
+        );
+        assert!(!r.has_errors(), "diags: {:?}", r.diagnostics);
+        let p = r.program.unwrap();
+        assert_eq!(p.statements.len(), 2); // the label itself emits nothing
+        assert_eq!(p.symbols.get("done").unwrap().addr, p.text_base + 8);
+        assert_eq!(p.statements[0].encoding, 0x0000_0463); // beq zero, zero, +8
+    }
+
+    #[test]
+    fn unterminated_macro_is_error() {
+        let r = asm(".macro loose\n    nop\n");
+        assert!(r.has_errors());
+        assert!(r.diagnostics.iter().any(|d| d.code == "E-DIRECTIVE" && d.message.contains(".end_macro")));
     }
 }

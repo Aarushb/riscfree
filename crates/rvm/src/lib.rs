@@ -314,10 +314,14 @@ impl Machine {
         };
 
         let outcome = exec::execute(self, word, pc_before);
+        // The instruction retired even when it halted the machine (an exit
+        // ecall, for instance); RARS counts it.
+        if outcome.outcome.executed {
+            self.instret += 1;
+        }
         if outcome.terminated_now {
             return outcome.outcome;
         }
-        self.instret += 1;
 
         // Cliff: PC moved past the last statement.
         if self.pc >= self.program.text_end() {
