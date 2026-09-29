@@ -4,12 +4,14 @@
 
 mod exec;
 mod host;
+mod mmio;
 mod memory;
 mod syscalls;
 
 pub use host::{Host, ScriptHost, StdHost};
 
 use crate::memory::{MemError, MemLayout, Memory};
+use crate::mmio::Mmio;
 use rvasm::Program;
 use std::collections::{BTreeSet, VecDeque};
 
@@ -134,6 +136,7 @@ pub struct Machine {
     pub(crate) csrs: std::collections::BTreeMap<u16, u64>,
     pub(crate) pc: u32,
     pub(crate) mem: Memory,
+    mmio: Mmio,
     layout: MemLayout,
     config: MachineConfig,
     program: Program,
@@ -181,6 +184,7 @@ impl Machine {
             csrs: std::collections::BTreeMap::new(),
             pc: program.text_base,
             mem: Memory::default(),
+            mmio: Mmio::new(layout.mmio_base),
             layout,
             config,
             program,
@@ -403,6 +407,31 @@ impl Machine {
         self.instret = 0;
     }
 
+    /// Publish program arguments the RARS way: argv strings go just below
+    /// $sp, $a1 points at the argv pointer array (NULL-terminated) and
+    /// $a0 = argc. Call after `new` and before running; writes land directly
+    /// (nothing has executed, so there is nothing to journal).
+    pub fn set_program_args(&mut self, args: &[String]) {
+        let mut top = self.layout.stack_top;
+        // Strings first, packed downward from the stack top.
+        let mut string_addrs = Vec::with_capacity(args.len());
+        for arg in args {
+            top = top.wrapping_sub(arg.len() as u32 + 1); // + NUL
+            self.mem.write_bytes(top, arg.as_bytes());
+            self.mem.write_bytes(top + arg.len() as u32, &[0]);
+            string_addrs.push(top);
+        }
+        // Then the pointer array, word-aligned, with an argv[argc] = NULL.
+        top &= !0x3;
+        top -= 4 * (args.len() as u32 + 1);
+        for (i, addr) in string_addrs.iter().enumerate() {
+            self.mem.write_bytes(top + 4 * i as u32, &addr.to_le_bytes());
+        }
+        self.mem.write_bytes(top + 4 * args.len() as u32, &0u32.to_le_bytes());
+        self.regs[10] = args.len() as u64; // a0 = argc
+        self.regs[11] = u64::from(top); // a1 = argv
+    }
+
     // ---- Internal helpers used by exec/syscalls ----
 
     pub(crate) fn write_reg(&mut self, index: usize, value: u64, changes: &mut Vec<Change>) {
@@ -436,6 +465,16 @@ impl Machine {
         if !self.config.allow_unaligned && !addr.is_multiple_of(width) {
             return Err(MemError::Unaligned { addr, width });
         }
+        // MMIO registers answer before the memory path; device reads have
+        // side effects (receiver data pops a key), so no journal entry.
+        if self.mmio.in_window(addr) {
+            let val = {
+                let host: &mut dyn Host = &mut *self.host;
+                self.mmio.load(addr, width, host)
+            };
+            changes.push(Change::Mem { addr, old: 0, new: val, width: width as u8 });
+            return Ok(val);
+        }
         if !self.valid_addr(addr) {
             return Err(MemError::AccessViolation { addr });
         }
@@ -464,15 +503,19 @@ impl Machine {
         if !self.config.allow_unaligned && !addr.is_multiple_of(width) {
             return Err(MemError::Unaligned { addr, width });
         }
-        if !self.valid_addr(addr) {
-            return Err(MemError::AccessViolation { addr });
-        }
-        // MMIO transmitter: character console (RARS's transmitter data port).
-        if addr == self.layout.mmio_base + 0x0c {
-            let text = (value as u8 as char).to_string();
-            self.host.write_output(&text);
+        // MMIO registers swallow the store (device side effects instead of
+        // memory); the effects (output, key consumption) cannot be undone,
+        // so unlike normal stores nothing enters the backstep journal.
+        if self.mmio.in_window(addr) {
+            {
+                let host: &mut dyn Host = &mut *self.host;
+                self.mmio.store(addr, value, host);
+            }
             changes.push(Change::Mem { addr, old: 0, new: value, width: width as u8 });
             return Ok(());
+        }
+        if !self.valid_addr(addr) {
+            return Err(MemError::AccessViolation { addr });
         }
         let old = match width {
             1 => self.mem.read_u8(addr).unwrap_or(0) as u64,
@@ -650,5 +693,28 @@ ecall
         let events = m.run(Some(100));
         assert_eq!(events.last(), Some(&Event::Halted(Halt::Limit)));
         assert_eq!(m.instret(), 100);
+    }
+
+    #[test]
+    fn program_args_lay_out_argv() {
+        let mut m = machine("    nop\n");
+        m.set_program_args(&["foo".into(), "barbaz".into()]);
+        assert_eq!(m.reg(10), 2); // a0 = argc
+        let argv = m.reg(11) as u32; // a1 = argv
+        let mut word = [0u8; 4];
+        m.peek_bytes(argv + 8, &mut word).unwrap();
+        assert_eq!(word, [0; 4]); // argv[argc] = NULL
+        let mut strings = Vec::new();
+        for i in 0..2 {
+            m.peek_bytes(argv + 4 * i, &mut word).unwrap();
+            strings.push(u32::from_le_bytes(word));
+        }
+        let mut buf = [0u8; 7];
+        m.peek_bytes(strings[0], &mut buf).unwrap();
+        assert_eq!(&buf[..4], b"foo\0");
+        m.peek_bytes(strings[1], &mut buf).unwrap();
+        assert_eq!(&buf, b"barbaz\0");
+        // Strings and the pointer array live below the initial $sp.
+        assert!(strings.iter().chain(&[argv]).all(|a| *a < 0x7fff_fffc));
     }
 }
