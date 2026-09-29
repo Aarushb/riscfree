@@ -1,0 +1,27 @@
+# Local-only agent directives: never commit, never push
+AGENT-CORE-DIRECTIVES.MD
+
+# Rust
+/target
+**/*.rs.bk
+
+# Profiling data
+*.profraw
+*.profdata
+flamegraph.svg
+perf.data*
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS junk
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Scratch and local notes
+/scratch/
+*.local.md
