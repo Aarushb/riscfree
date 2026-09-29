@@ -15,8 +15,9 @@ use std::time::Duration;
 const RUN_CHUNK: u64 = 100_000;
 
 pub enum Cmd {
-    /// Install a freshly assembled program (also resets the machine).
-    Load(Box<Program>),
+    /// Install a freshly assembled program (also resets the machine); the
+    /// flag selects RV64 machine semantics and must match the assemble mode.
+    Load(Box<Program>, bool),
     Run,
     Pause,
     Step,
@@ -125,14 +126,18 @@ pub fn start_sim_thread(cmds: Receiver<Cmd>, events: Sender<Evt>, input: InputCh
 
         if let Some(cmd) = cmd {
             match cmd {
-                Cmd::Load(program) => {
+                Cmd::Load(program, rv64) => {
                     let host = ChannelHost {
                         events: events.clone(),
                         input: input.clone(),
                         pending: None,
                         pending_pos: 0,
                     };
-                    let m = Machine::new(*program, Box::new(host), MachineConfig::default());
+                    let m = Machine::new(
+                        *program,
+                        Box::new(host),
+                        MachineConfig { rv64, ..MachineConfig::default() },
+                    );
                     let (pc, instret) = (m.pc(), m.instret());
                     send_state(&events, &m);
                     events.send(Evt::Loaded { pc, instret }).ok();

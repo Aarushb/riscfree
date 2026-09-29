@@ -63,6 +63,12 @@ fn sx(v: u32, bits: u32) -> u64 {
     (((v << shift) as i32) >> shift) as i64 as u64
 }
 
+/// Sign-extend a 32-bit value to the full register width: the result rule
+/// for every RV64 `*w` operation.
+fn sx32(v: u32) -> u64 {
+    v as i32 as i64 as u64
+}
+
 fn imm_i(w: u32) -> u64 {
     sx(w >> 20, 12)
 }
@@ -94,6 +100,16 @@ fn imm_j(w: u32) -> u64 {
 
 fn shamt(w: u32) -> u64 {
     ((w >> 20) & 0x1f) as u64
+}
+
+/// Shift amount, six bits wide in RV64 (imm[5] becomes shamt[5]).
+fn shamt_of(m: &Machine, w: u32) -> u64 {
+    ((w >> 20) & if m.rv64() { 0x3f } else { 0x1f }) as u64
+}
+
+/// Register shift amount mask: RV32 uses the low 5 bits, RV64 the low 6.
+fn shift_mask(m: &Machine) -> u64 {
+    if m.rv64() { 0x3f } else { 0x1f }
 }
 
 fn rd(w: u32) -> usize {
@@ -134,13 +150,16 @@ pub(crate) fn execute(m: &mut Machine, w: u32, pc_before: u32) -> ExecOutcome {
 
     match opcode {
         0x37 => {
-            // lui
-            let v = imm_u(w);
+            // lui: the 32-bit U immediate is sign-extended to XLEN in RV64.
+            let raw = imm_u(w) as u32;
+            let v = if m.rv64() { sx32(raw) } else { u64::from(raw) };
             m.write_reg(rd(w), v, &mut changes);
         }
         0x17 => {
-            // auipc
-            let v = (pc_before as u64).wrapping_add(imm_u(w));
+            // auipc: same sign-extension rule as lui in RV64.
+            let raw = imm_u(w) as u32;
+            let imm = if m.rv64() { sx32(raw) } else { u64::from(raw) };
+            let v = (pc_before as u64).wrapping_add(imm);
             m.write_reg(rd(w), v, &mut changes);
         }
         0x6f => {
@@ -158,11 +177,22 @@ pub(crate) fn execute(m: &mut Machine, w: u32, pc_before: u32) -> ExecOutcome {
             m.pc = target;
         }
         0x63 => {
-            // branches
-            let a = m.regs[rs1(w)] as u32 as i32;
-            let b = m.regs[rs2(w)] as u32 as i32;
-            let au = m.regs[rs1(w)] as u32;
-            let bu = m.regs[rs2(w)] as u32;
+            // branches: compares run at register width (32- or 64-bit).
+            let (a, b, au, bu) = if m.rv64() {
+                (
+                    m.regs[rs1(w)] as i64,
+                    m.regs[rs2(w)] as i64,
+                    m.regs[rs1(w)],
+                    m.regs[rs2(w)],
+                )
+            } else {
+                (
+                    m.regs[rs1(w)] as u32 as i32 as i64,
+                    m.regs[rs2(w)] as u32 as i32 as i64,
+                    u64::from(m.regs[rs1(w)] as u32),
+                    u64::from(m.regs[rs2(w)] as u32),
+                )
+            };
             let taken = match (w >> 12) & 0x7 {
                 0 => a == b,
                 1 => a != b,
@@ -177,14 +207,20 @@ pub(crate) fn execute(m: &mut Machine, w: u32, pc_before: u32) -> ExecOutcome {
             }
         }
         0x03 => {
-            // loads
+            // loads. Addresses stay 32-bit by design: RARS's memory map (and
+            // therefore every address a teaching program can form) lives in
+            // the low 4 GB, so the effective address truncates to u32 in both
+            // modes.
             let addr = (m.regs[rs1(w)] as u32).wrapping_add(imm_i(w) as u32);
             let loaded = match (w >> 12) & 0x7 {
                 0 => m.load_signed(addr, 1, &mut changes),
                 1 => m.load_signed(addr, 2, &mut changes),
                 2 => m.load_signed(addr, 4, &mut changes),
+                // RV64: ld moves a full doubleword; lwu zero-extends a word.
+                3 => m.load_bytes(addr, 8, &mut changes),
                 4 => m.load_bytes(addr, 1, &mut changes),
                 5 => m.load_bytes(addr, 2, &mut changes),
+                6 => m.load_bytes(addr, 4, &mut changes),
                 f => bail!(format!("invalid load funct3 {f}")),
             };
             match loaded {
@@ -200,13 +236,15 @@ pub(crate) fn execute(m: &mut Machine, w: u32, pc_before: u32) -> ExecOutcome {
             }
         }
         0x23 => {
-            // stores
+            // stores (sd adds the RV64 doubleword form); addresses truncate
+            // to 32 bits exactly as for loads.
             let addr = (m.regs[rs1(w)] as u32).wrapping_add(imm_s(w) as u32);
             let val = m.regs[rs2(w)];
             let r = match (w >> 12) & 0x7 {
                 0 => m.store_bytes(addr, val, 1, &mut changes),
                 1 => m.store_bytes(addr, val, 2, &mut changes),
                 2 => m.store_bytes(addr, val, 4, &mut changes),
+                3 => m.store_bytes(addr, val, 8, &mut changes),
                 f => bail!(format!("invalid store funct3 {f}")),
             };
             if let Err(e) = r {
@@ -219,22 +257,34 @@ pub(crate) fn execute(m: &mut Machine, w: u32, pc_before: u32) -> ExecOutcome {
             }
         }
         0x13 => {
-            // op-imm
+            // op-imm: compares and shifts run at register width.
             let a = m.regs[rs1(w)];
             let imm = imm_i(w);
             let v = match (w >> 12) & 0x7 {
                 0 => a.wrapping_add(imm),
-                2 => ((a as u32 as i32) < (imm as u32 as i32)) as u64,
-                3 => ((a as u32) < (imm as u32)) as u64,
+                2 => {
+                    if m.rv64() {
+                        ((a as i64) < (imm as i64)) as u64 // slti
+                    } else {
+                        ((a as u32 as i32) < (imm as u32 as i32)) as u64
+                    }
+                }
+                3 => {
+                    if m.rv64() {
+                        (a < imm) as u64 // sltiu, xlen-unsigned
+                    } else {
+                        ((a as u32) < (imm as u32)) as u64
+                    }
+                }
                 4 => a ^ imm,
                 6 => a | imm,
                 7 => a & imm,
-                1 => a << shamt(w), // slli
+                1 => a << shamt_of(m, w), // slli
                 5 => {
                     if (w >> 25) & 0x20 != 0 {
-                        ((a as i64) >> shamt(w)) as u64 // srai
+                        ((a as i64) >> shamt_of(m, w)) as u64 // srai
                     } else {
-                        a >> shamt(w) // srli
+                        a >> shamt_of(m, w) // srli
                     }
                 }
                 _ => unreachable!(),
@@ -242,20 +292,77 @@ pub(crate) fn execute(m: &mut Machine, w: u32, pc_before: u32) -> ExecOutcome {
             m.write_reg(rd(w), v, &mut changes);
         }
         0x33 => {
-            // op
+            // op: register-width arithmetic; the M extension follows the
+            // register width too (64-bit operands in RV64).
             let a = m.regs[rs1(w)];
             let b = m.regs[rs2(w)];
+            let mask = shift_mask(m);
             let v = match ((w >> 12) & 0x7, (w >> 25) & 0x3f) {
                 (0, 0x00) => a.wrapping_add(b),           // add
                 (0, 0x20) => a.wrapping_sub(b),           // sub
-                (1, 0x00) => a << (b & 0x1f),             // sll
-                (2, 0x00) => ((a as u32 as i32) < (b as u32 as i32)) as u64, // slt
-                (3, 0x00) => ((a as u32) < (b as u32)) as u64,               // sltu
+                (1, 0x00) => a << (b & mask),             // sll
+                (2, 0x00) => {
+                    if m.rv64() {
+                        ((a as i64) < (b as i64)) as u64 // slt
+                    } else {
+                        ((a as u32 as i32) < (b as u32 as i32)) as u64
+                    }
+                }
+                (3, 0x00) => {
+                    if m.rv64() {
+                        (a < b) as u64 // sltu
+                    } else {
+                        ((a as u32) < (b as u32)) as u64
+                    }
+                }
                 (4, 0x00) => a ^ b,                       // xor
-                (5, 0x00) => a >> (b & 0x1f),             // srl
-                (5, 0x20) => ((a as i64) >> (b & 0x1f)) as u64, // sra
+                (5, 0x00) => a >> (b & mask),             // srl
+                (5, 0x20) => ((a as i64) >> (b & mask)) as u64, // sra
                 (6, 0x00) => a | b,                       // or
                 (7, 0x00) => a & b,                       // and
+                // RV32M: results are 32-bit and stored sign-extended. RV64M
+                // runs the same rules on full 64-bit operands.
+                (0, 0x01) if m.rv64() => (a as i64).wrapping_mul(b as i64) as u64, // mul
+                // The signed products fit i128 exactly, so >> 64 is the
+                // exact upper half (arithmetic for mulh/mulhsu).
+                (1, 0x01) if m.rv64() => {
+                    (((a as i64 as i128) * (b as i64 as i128)) >> 64) as u64 // mulh
+                }
+                (2, 0x01) if m.rv64() => {
+                    (((a as i64 as i128) * (b as i128)) >> 64) as u64 // mulhsu
+                }
+                (3, 0x01) if m.rv64() => (((a as u128) * (b as u128)) >> 64) as u64, // mulhu
+                (4, 0x01) if m.rv64() => {
+                    // div/rem follow RISC-V's no-trap rules at 64-bit width.
+                    let (x, y) = (a as i64, b as i64);
+                    let v: i64 = if y == 0 {
+                        -1
+                    } else if x == i64::MIN && y == -1 {
+                        i64::MIN
+                    } else {
+                        x / y
+                    };
+                    v as u64
+                }
+                (5, 0x01) if m.rv64() => {
+                    // Divide by zero yields all ones instead of trapping.
+                    a.checked_div(b).unwrap_or(u64::MAX)
+                }
+                (6, 0x01) if m.rv64() => {
+                    let (x, y) = (a as i64, b as i64);
+                    let v: i64 = if y == 0 {
+                        x
+                    } else if x == i64::MIN && y == -1 {
+                        0
+                    } else {
+                        x % y
+                    };
+                    v as u64
+                }
+                (7, 0x01) if m.rv64() => {
+                    let (x, y) = (a, b);
+                    if y == 0 { x } else { x % y }
+                }
                 // RV32M: results are 32-bit and stored sign-extended.
                 (0, 0x01) => (a as u32 as i32).wrapping_mul(b as u32 as i32) as i64 as u64, // mul
                 // The signed products fit i64 exactly, so >> 32 is the
@@ -300,6 +407,70 @@ pub(crate) fn execute(m: &mut Machine, w: u32, pc_before: u32) -> ExecOutcome {
                     v as i32 as i64 as u64
                 }
                 (f, f7) => bail!(format!("invalid op funct3 {f} funct7 {f7}")),
+            };
+            m.write_reg(rd(w), v, &mut changes);
+        }
+        0x1b => {
+            // RV64 op-imm-32: add the immediate / shift within 32 bits,
+            // then sign-extend the word result to 64.
+            let a = m.regs[rs1(w)];
+            let v = match (w >> 12) & 0x7 {
+                0 => sx32(a.wrapping_add(imm_i(w)) as u32), // addiw
+                1 => sx32((a as u32) << shamt(w)), // slliw
+                5 => {
+                    if (w >> 25) & 0x20 != 0 {
+                        sx32((((a as u32) as i32) >> shamt(w)) as u32) // sraiw
+                    } else {
+                        sx32((a as u32) >> shamt(w)) // srliw
+                    }
+                }
+                f => bail!(format!("invalid op-imm-32 funct3 {f}")),
+            };
+            m.write_reg(rd(w), v, &mut changes);
+        }
+        0x3b => {
+            // RV64 op-32 (w-suffixes) and the M w-suffixes: 32-bit compute,
+            // then sign-extend.
+            let a = m.regs[rs1(w)];
+            let b = m.regs[rs2(w)];
+            let v = match ((w >> 12) & 0x7, (w >> 25) & 0x3f) {
+                (0, 0x00) => sx32(a.wrapping_add(b) as u32),           // addw
+                (0, 0x20) => sx32(a.wrapping_sub(b) as u32),           // subw
+                (1, 0x00) => sx32((a << (b & 0x1f)) as u32),           // sllw
+                (5, 0x00) => sx32((a >> (b & 0x1f)) as u32),           // srlw
+                (5, 0x20) => sx32((((a as u32) as i32) >> (b & 0x1f)) as u32), // sraw
+                (0, 0x01) => sx32((a as u32).wrapping_mul(b as u32)),  // mulw
+                (4, 0x01) => {
+                    let (x, y) = (a as u32 as i32, b as u32 as i32);
+                    let r: i32 = if y == 0 {
+                        -1
+                    } else if x == i32::MIN && y == -1 {
+                        i32::MIN
+                    } else {
+                        x / y
+                    };
+                    sx32(r as u32) // divw
+                }
+                (5, 0x01) => {
+                    let r = (a as u32).checked_div(b as u32).unwrap_or(u32::MAX);
+                    sx32(r) // divuw
+                }
+                (6, 0x01) => {
+                    let (x, y) = (a as u32 as i32, b as u32 as i32);
+                    let r: i32 = if y == 0 {
+                        x
+                    } else if x == i32::MIN && y == -1 {
+                        0
+                    } else {
+                        x % y
+                    };
+                    sx32(r as u32) // remw
+                }
+                (7, 0x01) => {
+                    let (x, y) = (a as u32, b as u32);
+                    sx32(if y == 0 { x } else { x % y }) // remuw
+                }
+                (f, f7) => bail!(format!("invalid op-32 funct3 {f} funct7 {f7}")),
             };
             m.write_reg(rd(w), v, &mut changes);
         }
@@ -514,40 +685,67 @@ fn fp_op(m: &mut Machine, w: u32, changes: &mut Vec<Change>) -> Result<(), Strin
             m.write_reg(rd, res, changes);
             m.acc_fflags(flags, changes);
         }
-        // fcvt.w.s / fcvt.wu.s / fcvt.w.d / fcvt.wu.d: float to int, rs2
-        // picks signed (0) or unsigned (1), funct3 the rounding mode.
+        // fcvt.w.s / fcvt.wu.s / fcvt.w.d / fcvt.wu.d (rs2 0/1) produce
+        // sign-extended 32-bit results; fcvt.l.s / fcvt.lu.s / fcvt.l.d /
+        // fcvt.lu.d (rs2 2/3, RV64 only) produce full 64-bit results.
+        // Float-to-int conversions bake RTZ, funct3 the rounding mode.
         48 => {
             let Some(rm) = fp_rm(m, f3) else {
                 return Err(format!("invalid rounding mode {f3}"));
             };
-            if rs2(w) > 1 {
+            if rs2(w) > 3 {
                 return Err(format!("invalid fcvt rs2 {}", rs2(w)));
             }
-            let unsigned = rs2(w) == 1;
+            if rs2(w) >= 2 && !m.rv64() {
+                return Err("64-bit fcvt forms require RV64".to_string());
+            }
+            let unsigned = rs2(w) & 1 == 1;
             let a = m.fregs[rs1(w)];
-            let (res, flags) = fp::cvt_to_int(if dbl { a } else { fp::single_bits(a) as u64 }, dbl, rm, unsigned);
+            let (res, flags) = match rs2(w) {
+                2 | 3 => fp::cvt_to_int64(a, dbl, rm, unsigned),
+                _ => fp::cvt_to_int(if dbl { a } else { fp::single_bits(a) as u64 }, dbl, rm, unsigned),
+            };
             m.write_reg(rd, res, changes);
             m.acc_fflags(flags, changes);
         }
-        // fcvt.s.w / fcvt.s.wu / fcvt.d.w / fcvt.d.wu: int to float.
+        // fcvt.s.w / fcvt.s.wu / fcvt.d.w / fcvt.d.wu take 32-bit sources;
+        // fcvt.s.l / fcvt.s.lu / fcvt.d.l / fcvt.d.lu (rs2 2/3, RV64 only)
+        // convert from full 64-bit integers.
         52 => {
             let Some(rm) = fp_rm(m, f3) else {
                 return Err(format!("invalid rounding mode {f3}"));
             };
-            if rs2(w) > 1 {
+            if rs2(w) > 3 {
                 return Err(format!("invalid fcvt rs2 {}", rs2(w)));
             }
-            let unsigned = rs2(w) == 1;
+            if rs2(w) >= 2 && !m.rv64() {
+                return Err("64-bit fcvt forms require RV64".to_string());
+            }
+            let unsigned = rs2(w) & 1 == 1;
             let v = m.regs[rs1(w)];
-            if dbl {
-                m.write_freg(rd, fp::cvt_int_to_f64(v, unsigned), changes);
-            } else {
-                let (bits, flags) = fp::cvt_int_to_f32(v, unsigned, rm);
-                m.write_freg(rd, fp::box_single(bits), changes);
-                m.acc_fflags(flags, changes);
+            match (rs2(w), dbl) {
+                (2 | 3, false) => {
+                    let (bits, flags) = fp::cvt_int64_to_f32(v, unsigned, rm);
+                    m.write_freg(rd, fp::box_single(bits), changes);
+                    m.acc_fflags(flags, changes);
+                }
+                (2 | 3, true) => {
+                    let (bits, flags) = fp::cvt_int64_to_f64(v, unsigned, rm);
+                    m.write_freg(rd, bits, changes);
+                    m.acc_fflags(flags, changes);
+                }
+                (_, true) => {
+                    m.write_freg(rd, fp::cvt_int_to_f64(v, unsigned), changes);
+                }
+                (_, false) => {
+                    let (bits, flags) = fp::cvt_int_to_f32(v, unsigned, rm);
+                    m.write_freg(rd, fp::box_single(bits), changes);
+                    m.acc_fflags(flags, changes);
+                }
             }
         }
         // fmv.x.s (funct3 0) and fclass (funct3 1): integer destinations.
+        // fmv.x.d (funct3 0, double) moves all 64 bits across.
         56 => {
             let a = m.fregs[rs1(w)];
             match (f3, dbl) {
@@ -555,19 +753,28 @@ fn fp_op(m: &mut Machine, w: u32, changes: &mut Vec<Change>) -> Result<(), Strin
                     // Bit move: sign-extended per the 32-bit convention.
                     m.write_reg(rd, fp::single_bits(a) as i32 as i64 as u64, changes);
                 }
+                (0, true) => {
+                    // fmv.x.d: the full doubleword moves unchanged.
+                    m.write_reg(rd, a, changes);
+                }
                 (1, _) => {
                     let mask = if dbl { fp::classify64(a) } else { fp::classify32(fp::single_bits(a)) };
                     m.write_reg(rd, mask, changes);
                 }
-                _ => return Err("fmv.x.d requires RV64".to_string()),
+                _ => return Err(format!("invalid fmv.x/fclass encoding (funct3 {f3})")),
             }
         }
-        // fmv.s.x: integer register bits move into an FP register (boxed).
+        // fmv.s.x boxes the low word of the integer register into the FP
+        // register; fmv.d.x (double) moves all 64 bits unboxed.
         60 => {
-            if f3 != 0 || dbl {
-                return Err("invalid fmv.s.x encoding".to_string());
+            if f3 != 0 {
+                return Err("invalid fmv.x encoding".to_string());
             }
-            m.write_freg(rd, fp::box_single(m.regs[rs1(w)] as u32), changes);
+            if dbl {
+                m.write_freg(rd, m.regs[rs1(w)], changes);
+            } else {
+                m.write_freg(rd, fp::box_single(m.regs[rs1(w)] as u32), changes);
+            }
         }
         other => return Err(format!("invalid FP funct7 {f7} (group {other})")),
     }
@@ -1221,5 +1428,329 @@ three: .float 3.0
         let pc = m.program().text_base;
         let out = execute(&mut m, w, pc);
         assert!(matches!(out.outcome.events.last(), Some(Event::Halted(Halt::Error { .. }))));
+    }
+
+    // ---- RV64 mode (MachineConfig::rv64) ----
+
+    #[test]
+    fn rv64_wide_li_materializes_exact_values() {
+        let src = "\
+    li t0, 1000000000000000
+    li a0, 9223372036854775807
+    addi a0, a0, 1          # wraps to i64::MIN
+    li a1, -1
+    add a2, a1, a1          # 64-bit -2
+";
+        let mut m = machine64(src);
+        m.run(None);
+        assert_eq!(m.reg(5), 1_000_000_000_000_000); // t0: the 8-instruction RARS chain
+        assert_eq!(m.reg(10), 0x8000_0000_0000_0000); // add carry past bit 63
+        assert_eq!(m.reg(12), 0xffff_ffff_ffff_fffe);
+    }
+
+    #[test]
+    fn rv64_add_carry_past_bit_32() {
+        let src = "\
+    li t0, 0xffffffff       # 2^32-1 via the wide chain (exact, positive)
+    li t1, 1
+    add a0, t0, t1          # carry out of bit 31...
+    add a1, a0, a0          # ...and arithmetic running past bit 32
+";
+        let mut m = machine64(src);
+        m.run(None);
+        assert_eq!(m.reg(10), 0x1_0000_0000);
+        assert_eq!(m.reg(11), 0x2_0000_0000);
+    }
+
+    #[test]
+    fn rv64_ld_sd_roundtrip() {
+        // sp is 4-aligned by the fixed memory map, so the doubleword goes at
+        // sp-4 (8-aligned) like a real program would after `addi sp, sp, -8`.
+        let src = "\
+    li t0, 0x123456789abcdef
+    sd t0, -4(sp)
+    ld a0, -4(sp)
+    ld a1, 4(sp)            # untouched memory reads zero
+";
+        let mut m = machine64(src);
+        m.run(None);
+        assert_eq!(m.reg(10), 0x0123_4567_89ab_cdef);
+        assert_eq!(m.reg(11), 0);
+        // The doubleword really sits in memory, little-endian.
+        let mut buf = [0u8; 8];
+        let sp = m.reg(2) as u32;
+        m.peek_bytes(sp - 4, &mut buf).unwrap();
+        assert_eq!(buf, 0x0123_4567_89ab_cdefu64.to_le_bytes());
+    }
+
+    #[test]
+    fn rv64_addiw_and_w_ops_sign_extend() {
+        let src = "\
+    li t0, 0x80000000       # exact 64-bit 2^31 (positive)
+    addiw a0, t0, 0         # word result sign-extends
+    li t1, 1
+    addw a1, t0, t1         # 0x80000001 -> 0xffffffff80000001
+    subw a2, t1, t0         # 1 - 2^31 in 32 bits -> same pattern
+    slliw a3, t1, 31        # 1 << 31 sign-extended
+    sraiw a4, t0, 31        # arithmetic shift fills ones
+    srliw a5, t0, 31        # logical shift fills zeros
+    mulw a6, t0, t0         # low 32 bits are zero
+    divw a7, t0, t1         # 2^31 / 1, sign-extended
+    li t2, -1
+    divw s0, t0, t2         # MIN / -1 overflow returns the dividend
+    remw s1, t0, t2         # ...with remainder 0
+    remuw s2, t1, t0        # 1 % 2^31 = 1
+    li t3, 31
+    sllw s3, t1, t3         # R-type register forms too
+    sraw s4, t0, t3
+";
+        let mut m = machine64(src);
+        m.run(None);
+        let want_sx = 0xffff_ffff_8000_0001u64;
+        assert_eq!(m.reg(10), 0xffff_ffff_8000_0000); // addiw
+        assert_eq!(m.reg(11), want_sx); // addw
+        assert_eq!(m.reg(12), want_sx); // subw
+        assert_eq!(m.reg(13), 0xffff_ffff_8000_0000); // slliw
+        assert_eq!(m.reg(14), u64::MAX); // sraiw: -1
+        assert_eq!(m.reg(15), 1); // srliw
+        assert_eq!(m.reg(16), 0); // mulw
+        assert_eq!(m.reg(17), 0xffff_ffff_8000_0000); // divw
+        assert_eq!(m.reg(8), 0xffff_ffff_8000_0000); // divw overflow
+        assert_eq!(m.reg(9), 0); // remw after overflow
+        assert_eq!(m.reg(18), 1); // remuw
+        assert_eq!(m.reg(19), 0xffff_ffff_8000_0000); // sllw (register amount)
+        assert_eq!(m.reg(20), u64::MAX); // sraw (register amount)
+    }
+
+    #[test]
+    fn rv64_lwu_zero_extends_while_lw_sign_extends() {
+        let src = "\
+    li t0, -1
+    sw t0, 0(sp)
+    lw a0, 0(sp)
+    lwu a1, 0(sp)
+";
+        let mut m = machine64(src);
+        m.run(None);
+        assert_eq!(m.reg(10), u64::MAX);
+        assert_eq!(m.reg(11), 0x0000_0000_ffff_ffff);
+    }
+
+    #[test]
+    fn rv64_shifts_beyond_31() {
+        let src = "\
+    li a1, 1
+    slli a0, a1, 40
+    srli a2, a0, 36
+    srai a3, a1, 1
+    li t0, -1024
+    srai a4, t0, 3
+    li t1, 40
+    sll a5, a1, t1          # register shift uses six bits in RV64
+    sra a6, t0, t1
+";
+        let mut m = machine64(src);
+        m.run(None);
+        assert_eq!(m.reg(10), 1u64 << 40);
+        assert_eq!(m.reg(12), 0x10);
+        assert_eq!(m.reg(13), 0);
+        assert_eq!(m.reg(14), (-128i64) as u64);
+        assert_eq!(m.reg(15), 1u64 << 40);
+        assert_eq!(m.reg(16), (-1i64) as u64); // -1024 >> 40 arithmetic
+    }
+
+    #[test]
+    fn rv64_branches_compare_full_width() {
+        let src = "\
+    li a0, -1               # 0xffffffffffffffff
+    li a1, 1
+    li t0, 0
+    blt a0, a1, L1          # signed: -1 < 1 -> taken
+    addi t0, t0, 1
+L1: bgeu a0, a1, L2         # unsigned: huge >= 1 -> taken
+    addi t0, t0, 10
+L2: bltu a0, a1, L3         # unsigned: huge < 1 -> not taken
+    addi t0, t0, 100
+L3: beq a0, a1, L4          # full-width equality -> not taken
+    addi t0, t0, 1000
+L4: sw t0, 0(sp)
+";
+        let mut m = machine64(src);
+        m.run(None);
+        assert_eq!(m.reg(5), 1100);
+    }
+
+    #[test]
+    fn rv64_div_rem_mul_64bit() {
+        let src = "\
+    li a0, -8
+    li a1, 3
+    div a2, a0, a1
+    rem a3, a0, a1
+    li t0, -1
+    mul a4, t0, t0
+    mulh a5, t0, t0
+    li t1, 0x4000000000000000
+    mulh a6, t1, t1         # 2^62 * 2^62 >> 64 = 2^60
+    mulhu a7, t1, t1
+    li t2, 9223372036854775807
+    addi t2, t2, 1          # i64::MIN
+    li t3, -1
+    div t4, t2, t3          # overflow rule: quotient = i64::MIN
+    rem t5, t2, t3          # ...remainder 0
+    divu t6, t0, t0
+";
+        let mut m = machine64(src);
+        m.run(None);
+        assert_eq!(m.reg(12), (-2i64) as u64); // a2: div
+        assert_eq!(m.reg(13), (-2i64) as u64); // a3: rem
+        assert_eq!(m.reg(14), 1); // a4: mul(-1, -1)
+        assert_eq!(m.reg(15), 0); // a5: mulh(-1, -1)
+        assert_eq!(m.reg(16), 1u64 << 60); // a6: mulh(2^62, 2^62)
+        assert_eq!(m.reg(17), 1u64 << 60); // a7: mulhu agrees
+        assert_eq!(m.reg(7), i64::MIN as u64); // t2: addi wrap to i64::MIN
+        assert_eq!(m.reg(29), i64::MIN as u64); // t4: div overflow rule
+        assert_eq!(m.reg(30), 0); // t5: matching remainder
+        assert_eq!(m.reg(31), 1); // t6: divu all-ones / all-ones
+    }
+
+    #[test]
+    fn rv64_slt_compares_full_width() {
+        let src = "\
+    li a0, -1
+    li a1, 1
+    slt a2, a0, a1
+    sltu a3, a0, a1
+    sltiu a4, a1, -1
+    slti a5, a0, 0
+";
+        let mut m = machine64(src);
+        m.run(None);
+        assert_eq!(m.reg(12), 1); // -1 < 1 signed
+        assert_eq!(m.reg(13), 0); // 2^64-1 < 1 unsigned is false
+        assert_eq!(m.reg(14), 1); // 1 < sign-extended -1 unsigned
+        assert_eq!(m.reg(15), 1); // -1 < 0
+    }
+
+    #[test]
+    fn rv64_lui_and_auipc_sign_extend() {
+        let src = "\
+    lui a0, 0xfffff
+    auipc a1, 0x80000
+";
+        let mut m = machine64(src);
+        m.step();
+        assert_eq!(m.reg(10), 0xffff_ffff_ffff_f000);
+        m.step();
+        // auipc: pc + sign-extended immediate, wrapping at 64 bits.
+        let pc1 = u64::from(m.program().text_base + 4);
+        assert_eq!(m.reg(11), pc1.wrapping_add(0xffff_ffff_8000_0000));
+    }
+
+    #[test]
+    fn rv64_floating_point_bit_moves_and_truncations() {
+        let src = "\
+.data
+d:   .double 3.75
+nd:  .double -2.5
+s:   .float -2.9
+.text
+    fld f1, d
+    fcvt.l.d a0, f1         # 3 (RTZ baked, 64-bit result)
+    fcvt.lu.d a1, f1        # 3
+    fld f2, nd
+    fcvt.l.d a2, f2         # -2
+    flw f3, s
+    fcvt.l.s a3, f3         # -2 from a single
+    fmv.x.d a4, f1          # raw double bits move unchanged
+    li a5, 100
+    fmv.d.x f4, a5
+    fmv.x.d a6, f4          # 100 back out through the double bit-move
+";
+        let mut m = machine64(src);
+        m.run(None);
+        assert_eq!(m.reg(10), 3);
+        assert_eq!(m.reg(11), 3);
+        assert_eq!(m.reg(12), (-2i64) as u64);
+        assert_eq!(m.reg(13), (-2i64) as u64);
+        assert_eq!(m.reg(14), 3.75f64.to_bits());
+        assert_eq!(m.reg(16), 100);
+        assert_eq!(m.freg(4), 100); // fmv.d.x stores raw, unboxed bits
+    }
+
+    #[test]
+    fn rv64_fp_conversions_round_trip_wide_integers() {
+        let wide = 123456789123456789i64;
+        let src = format!(
+            "\
+.data
+big: .double {wide}
+.text
+    fld f1, big
+    fcvt.l.d a0, f1         # 64-bit integer result
+    fmv.x.d a1, f1          # raw bits move unchanged
+    li a2, {wide}
+    fcvt.d.l f2, a2         # int -> double (rounds to the f64 grid)
+    fcvt.l.d a3, f2
+    fsd f2, res
+.data
+res: .double 0
+"
+        );
+        let mut m = machine64(&src);
+        m.run(None);
+        let rounded = wide as f64;
+        assert_eq!(m.reg(10), rounded as i64 as u64);
+        assert_eq!(m.reg(11), rounded.to_bits());
+        assert_eq!(m.reg(13), rounded as i64 as u64);
+        // The stored double equals the f64 bits of the source integer.
+        let mut buf = [0u8; 8];
+        let addr = m.program().symbols.get("res").unwrap().addr;
+        m.peek_bytes(addr, &mut buf).unwrap();
+        assert_eq!(buf, rounded.to_bits().to_le_bytes());
+    }
+
+    #[test]
+    fn rv64_fcvt_overflow_saturates_64bit() {
+        let src = "\
+.data
+huge: .double 1e30
+nan:  .double nan
+.text
+    fld f1, huge
+    fcvt.l.d a0, f1         # -> i64::MAX + NV
+    fcvt.lu.d a1, f1        # -> u64::MAX + NV
+    fld f2, nan
+    fcvt.l.d a2, f2         # NaN -> i64::MAX + NV
+";
+        let mut m = machine64(src);
+        m.run(None);
+        assert_eq!(m.reg(10), i64::MAX as u64);
+        assert_eq!(m.reg(11), u64::MAX);
+        assert_eq!(m.reg(12), i64::MAX as u64);
+        assert_eq!(m.csr(csr::FFLAGS), fp::NV as u64);
+    }
+
+    #[test]
+    fn rv64_fcvt_int_to_float_flags_and_values() {
+        // 2^62 + 1 is inexact on the f64 grid (span 63 > 53).
+        let v = (1u64 << 62) + 1;
+        let src = format!(
+            "\
+    li a0, {v}
+    fcvt.d.l f0, a0
+    fcvt.l.d a1, f0
+    li a3, 1000000
+    fcvt.d.l f1, a3         # exact, no flags
+    fcvt.s.l f2, a3
+    fmv.x.s a4, f2
+"
+        );
+        let mut m = machine64(&src);
+        m.run(None);
+        assert_eq!(m.reg(11), v as f64 as i64 as u64); // a1: round-tripped
+        assert_eq!(m.csr(csr::FFLAGS), fp::NX as u64);
+        // 10^6 fits f32's 24-bit mantissa exactly.
+        assert_eq!(m.reg(14), 1_000_000f32.to_bits() as i32 as i64 as u64); // a4
     }
 }

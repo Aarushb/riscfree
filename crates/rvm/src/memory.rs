@@ -1,4 +1,11 @@
 //! Sparse paged memory with RARS's segment layout.
+//!
+//! Addresses are 32-bit even in RV64 mode by design: RARS's memory map
+//! (text at 0x00400000, static data at 0x10010000, stack top at 0x7fffeffc,
+//! MMIO at 0xffff0000) lives entirely in the low 4 GB in both of its modes,
+//! so widening the address path would change nothing a teaching program can
+//! reach. Effective addresses truncate to u32; only the *data* width grows
+//! (8-byte `ld`/`sd`/`fld`/`fsd`).
 
 use std::collections::HashMap;
 

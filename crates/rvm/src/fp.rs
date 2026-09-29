@@ -730,6 +730,61 @@ pub(crate) fn cvt_int_to_f32(v: u64, unsigned: bool, rm: u8) -> (u32, u8) {
     round_f64_to_f32_bits(x, rm)
 }
 
+/// FCVT float→int with a 64-bit result (fcvt.l.s/fcvt.lu.s/fcvt.l.d/
+/// fcvt.lu.d, RV64 only). Invalid inputs (NaN, ±inf, out of range) yield
+/// the target type's positive maximum with NV — the same documented
+/// simplification as the 32-bit path.
+pub(crate) fn cvt_to_int64(bits: u64, is_double: bool, rm: u8, unsigned: bool) -> (u64, u8) {
+    let nan = if is_double { f64_is_nan(bits) } else { f32_is_nan(bits as u32) };
+    if nan {
+        return (if unsigned { u64::MAX } else { i64::MAX as u64 }, NV);
+    }
+    let v: f64 = if is_double { f64::from_bits(bits) } else { f32::from_bits(bits as u32) as f64 };
+    if v.is_infinite() {
+        return (if unsigned { u64::MAX } else { i64::MAX as u64 }, NV);
+    }
+    let n = round_to_integer(v, rm);
+    let flags = if n != v { NX } else { 0 };
+    if unsigned {
+        // f64 holds 2^64 exactly, and that value is already out of range.
+        if !(0.0..18_446_744_073_709_551_616.0).contains(&n) {
+            return (u64::MAX, flags | NV);
+        }
+        (n as u64, flags)
+    } else {
+        // i64::MAX as f64 rounds up to 2^63, so the exclusive bound is exact.
+        if !(-9_223_372_036_854_775_808.0..9_223_372_036_854_775_808.0).contains(&n) {
+            return (i64::MAX as u64, flags | NV);
+        }
+        (n as i64 as u64, flags)
+    }
+}
+
+/// Exact representability of a 64-bit magnitude on a float grid: the value
+/// is exact iff its significant-bit span fits the mantissa (implicit bit
+/// included). Used to flag inexactness of int→float conversions.
+fn exact_on_grid(mag: u64, mantissa_bits: u32) -> bool {
+    mag == 0 || (63 - mag.leading_zeros()) - mag.trailing_zeros() <= mantissa_bits
+}
+
+/// FCVT int→f32 from a 64-bit source (fcvt.s.l/fcvt.s.lu, RV64 only).
+/// Host integer→float casts are correctly rounded RNE; other modes fall
+/// back to RNE, the same documented fallback as 64-bit div/sqrt.
+pub(crate) fn cvt_int64_to_f32(v: u64, unsigned: bool, _rm: u8) -> (u32, u8) {
+    let x: f32 = if unsigned { v as f32 } else { (v as i64) as f32 };
+    let mag = if unsigned { v } else { (v as i64).unsigned_abs() };
+    let flags = if exact_on_grid(mag, 23) { 0 } else { NX };
+    (x.to_bits(), flags)
+}
+
+/// FCVT int→f64 from a 64-bit source (fcvt.d.l/fcvt.d.lu, RV64 only).
+pub(crate) fn cvt_int64_to_f64(v: u64, unsigned: bool, _rm: u8) -> (u64, u8) {
+    let x: f64 = if unsigned { v as f64 } else { (v as i64) as f64 };
+    let mag = if unsigned { v } else { (v as i64).unsigned_abs() };
+    let flags = if exact_on_grid(mag, 52) { 0 } else { NX };
+    (x.to_bits(), flags)
+}
+
 /// FCVT int→f64 is always exact.
 pub(crate) fn cvt_int_to_f64(v: u64, unsigned: bool) -> u64 {
     if unsigned {

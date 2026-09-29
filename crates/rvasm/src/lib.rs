@@ -148,11 +148,18 @@ pub struct AsmConfig {
     pub data_base: u32,
     /// When false, pseudo-instructions are rejected like RARS's `np` flag.
     pub allow_pseudo: bool,
+    /// Assemble for RV64 (RARS's 64-bit setting; the default is RV32, as in
+    /// RARS). In 64-bit mode the RV64-only instructions are accepted (`ld`,
+    /// `sd`, `lwu`, the `*w` word ops, 6-bit base-shift immediates, and the
+    /// 64-bit FP conversions), `li` widens to the RARS 64-bit templates, and
+    /// pseudo-op semantics match `PseudoOps-64.txt`. Register/memory layout
+    /// is unchanged.
+    pub rv64: bool,
 }
 
 impl Default for AsmConfig {
     fn default() -> Self {
-        AsmConfig { text_base: 0x0040_0000, data_base: 0x1001_0000, allow_pseudo: true }
+        AsmConfig { text_base: 0x0040_0000, data_base: 0x1001_0000, allow_pseudo: true, rv64: false }
     }
 }
 

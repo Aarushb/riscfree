@@ -658,8 +658,20 @@ impl Assembler {
             self.err("E-SEGMENT", "instructions must appear inside .text", pos);
         }
         if let Some(info) = encode::lookup(mnemonic) {
+            // RV64-only instructions (ld/sd/lwu, the *w ops, 64-bit FP
+            // conversions) need 64-bit mode, like RARS's RV64 setting.
+            if info.rv64_only && !self.cfg.rv64 {
+                self.err(
+                    "E-XLEN",
+                    format!("'{mnemonic}' requires 64-bit mode (RV64); enable rv64 in the assembler settings"),
+                    pos,
+                );
+                self.advance(4);
+                return;
+            }
             // RARS label-form loads/stores: `lw rd, sym` / `sw rt, sym`, and
-            // the FP forms `flw fd, sym` / `fsw fs, sym`.
+            // the FP forms `flw fd, sym` / `fsw fs, sym`. In RV64 the same
+            // path serves `ld rd, sym` / `sd rt, sym` (lui %hi + ld/sd %lo).
             let fp_mem = matches!(info.kind, encode::InstrKind::FpLoad | encode::InstrKind::FpStore);
             let mem_sym = matches!(ops.last(), Some(Operand::Sym(_)))
                 && matches!(info.format, Format::I | Format::S)
@@ -711,10 +723,47 @@ impl Assembler {
         match (mnemonic, ops.as_slice()) {
             ("li", [Operand::Reg(rd), Operand::Imm(v)]) => {
                 let rd = *rd;
-                if (-2048..=2047).contains(v) {
-                    self.push_basic("addi", vec![r(rd), r(0), imm(*v)], pos, pos);
+                let v = *v;
+                if (-2048..=2047).contains(&v) {
+                    self.push_basic("addi", vec![r(rd), r(0), imm(v)], pos, pos);
+                } else if self.cfg.rv64 {
+                    // RARS's 64-bit li tiers (PseudoOps-64.txt): a 32-bit
+                    // value sign-extends through lui+addiw, and anything
+                    // wider uses the 8-instruction LIX chain
+                    //   lui rd, LIA; addiw rd, rd, LIB;
+                    //   slli rd, rd, 11; addi rd, rd, LIC;
+                    //   slli rd, rd, 11; addi rd, rd, LID;
+                    //   slli rd, rd, 10; addi rd, rd, LIE
+                    // whose operands (rars ExtendedInstruction.java) are
+                    //   LIA = (h >> 12) + bit11(h)   (sign-extended h>>12)
+                    //   LIB = sign_ext12(h)          (the %lo pairing)
+                    //   LIC = l[31:21]  LID = l[20:10]  LIE = l[9:0]
+                    // with h the high and l the low 32 bits of the value.
+                    // The chain shifts in two 11-bit and one 10-bit unsigned
+                    // chunk, so only the first pair needs sign compensation.
+                    if (-2147483648..=2147483647).contains(&v) {
+                        let (hi, lo) = hi_lo(v);
+                        self.push_basic("lui", vec![r(rd), imm(hi & 0xfffff)], pos, pos);
+                        self.push_basic("addiw", vec![r(rd), r(rd), imm(lo)], pos, pos);
+                    } else {
+                        let (h, l) = ((v >> 32) as i32, v as i32);
+                        let extra = i64::from((h as u32 >> 11) & 1);
+                        let lia = ((i64::from(h >> 12) + extra) as u32) & 0xfffff;
+                        let lib = i64::from((h << 20) >> 20);
+                        let lic = i64::from((l as u32 >> 21) & 0x7ff);
+                        let lid = i64::from((l as u32 >> 10) & 0x7ff);
+                        let lie = i64::from(l as u32 & 0x3ff);
+                        self.push_basic("lui", vec![r(rd), imm(i64::from(lia))], pos, pos);
+                        self.push_basic("addiw", vec![r(rd), r(rd), imm(lib)], pos, pos);
+                        self.push_basic("slli", vec![r(rd), r(rd), imm(11)], pos, pos);
+                        self.push_basic("addi", vec![r(rd), r(rd), imm(lic)], pos, pos);
+                        self.push_basic("slli", vec![r(rd), r(rd), imm(11)], pos, pos);
+                        self.push_basic("addi", vec![r(rd), r(rd), imm(lid)], pos, pos);
+                        self.push_basic("slli", vec![r(rd), r(rd), imm(10)], pos, pos);
+                        self.push_basic("addi", vec![r(rd), r(rd), imm(lie)], pos, pos);
+                    }
                 } else {
-                    let (hi, lo) = hi_lo(*v);
+                    let (hi, lo) = hi_lo(v);
                     self.push_basic("lui", vec![r(rd), imm(hi & 0xfffff)], pos, pos);
                     self.push_basic("addi", vec![r(rd), r(rd), imm(lo)], pos, pos);
                 }
@@ -1026,8 +1075,10 @@ impl Assembler {
         let mut enc_ops: Vec<u32> = Vec::new();
         let mut text_ops: Vec<String> = Vec::new();
         // Shift-immediates carry funct7 in imm[11:5] and the shift amount in
-        // imm[4:0]; the user writes just the amount.
-        let shift_imm = matches!(info.name, "slli" | "srli" | "srai");
+        // imm[4:0]; the user writes just the amount. In RV64 the base shifts
+        // widen shamt to six bits (imm[5:0]); the *iw forms stay 5-bit.
+        let shift_imm = matches!(info.name, "slli" | "srli" | "srai" | "slliw" | "srliw" | "sraiw");
+        let shamt_wide = self.cfg.rv64 && matches!(info.name, "slli" | "srli" | "srai");
         for (k, kind) in want.iter().enumerate() {
             let op = &instr.ops[k];
             match (kind, op) {
@@ -1040,10 +1091,12 @@ impl Assembler {
                     text_ops.push(abi_freg_name(*rx).to_string());
                 }
                 (OpKind::Imm(_), Operand::Imm(v)) if shift_imm => {
-                    if !(0..=31).contains(v) {
-                        return e("E-IMM", format!("shift amount {v} must be between 0 and 31"), instr.source);
+                    let max = if shamt_wide { 63 } else { 31 };
+                    if !(0..=max).contains(v) {
+                        return e("E-IMM", format!("shift amount {v} must be between 0 and {max}"), instr.source);
                     }
-                    enc_ops.push((info.funct7 << 5) | (*v as u32));
+                    let mask = if shamt_wide { 0x3f } else { 0x1f };
+                    enc_ops.push((info.funct7 << 5) | ((*v as u32) & mask));
                     text_ops.push(v.to_string());
                 }
                 (OpKind::Imm(range), Operand::Imm(v)) => {
@@ -1315,6 +1368,15 @@ mod tests {
     fn asm(src: &str) -> crate::AsmResult {
         let files = vec![InputFile { name: "t.s".into(), source: src.into() }];
         crate::assemble(&files, &AsmConfig::default())
+    }
+
+    fn asm_cfg(src: &str, rv64: bool) -> crate::AsmResult {
+        let files = vec![InputFile { name: "t.s".into(), source: src.into() }];
+        crate::assemble(&files, &AsmConfig { rv64, ..AsmConfig::default() })
+    }
+
+    fn asm64(src: &str) -> crate::AsmResult {
+        asm_cfg(src, true)
     }
 
     #[test]
@@ -1650,5 +1712,158 @@ mod tests {
         assert_eq!(p.statements[1].encoding >> 12 & 0x7, 1);
         assert_eq!(p.statements[3].encoding >> 25 & 0x7f, 0x11);
         assert_eq!(p.statements[0].expanded_from.map(|s| s.line), Some(1));
+    }
+
+    // ---- RV64 mode (AsmConfig::rv64) ----
+
+    #[test]
+    fn rv64_only_instructions_are_mode_gated() {
+        // RV32 (default): every RV64-only mnemonic is an E-XLEN error.
+        let r = asm("ld a0, 0(sp)\n");
+        assert!(r.has_errors());
+        let d = &r.diagnostics[0];
+        assert_eq!(d.code, "E-XLEN");
+        assert!(d.message.contains("64-bit"));
+        for src in ["sd a0, 0(sp)\n", "lwu a0, 0(sp)\n", "addiw a0, a1, 1\n", "addw a0, a1, a2\n",
+            "mulw a0, a1, a2\n", "slliw a0, a1, 3\n", "fcvt.l.s a0, f1\n", "fmv.x.d a0, f1\n"] {
+            let r = asm(src);
+            assert!(r.has_errors(), "RV32 should reject: {src}");
+            assert!(r.diagnostics.iter().any(|d| d.code == "E-XLEN"), "want E-XLEN for {src}");
+        }
+        // RV64 mode accepts all of them.
+        let r = asm64("ld a0, 0(sp)\nsd a0, 8(sp)\nlwu a1, -4(sp)\naddiw a0, a1, 1\naddw a2, a1, a1\nmulw a3, a1, a1\nfcvt.l.s a0, f1\nfmv.x.d a0, f1\nfmv.d.x f1, a0\n");
+        assert!(!r.has_errors(), "diags: {:?}", r.diagnostics);
+        // Everything else assembles identically in both modes.
+        let r = asm64("addi a0, zero, 5\nadd a1, a0, a0\necall\n");
+        assert!(!r.has_errors());
+        let p = r.program.unwrap();
+        assert_eq!(p.statements[0].encoding, 0x0050_0513);
+    }
+
+    #[test]
+    fn rv64_load_store_and_wide_shift_encodings() {
+        let r = asm64("ld a0, 8(sp)\nsd a0, 8(sp)\nlwu a1, -4(sp)\nslli a2, a1, 33\nsrai a3, a1, 40\n");
+        assert!(!r.has_errors(), "diags: {:?}", r.diagnostics);
+        let p = r.program.unwrap();
+        assert_eq!(p.statements[0].encoding, 0x0081_3503); // ld a0, 8(sp)
+        assert_eq!(p.statements[1].encoding, 0x00a1_3423); // sd a0, 8(sp)
+        assert_eq!(p.statements[2].encoding, 0xffc1_6583); // lwu a1, -4(sp): funct3 6
+        assert_eq!(p.statements[3].encoding, 0x0215_9613); // slli a2, a1, 33
+        assert_eq!(p.statements[4].encoding, 0x4285_d693); // srai a3, a1, 40
+        assert_eq!(p.statements[3].basic_text.as_ref(), "slli a2, a1, 33");
+    }
+
+    #[test]
+    fn rv32_still_rejects_wide_shifts() {
+        // The 6-bit shamt is RV64-only; RV32 keeps the old diagnostic.
+        let r = asm("slli a0, a1, 33\n");
+        assert!(r.has_errors());
+        assert_eq!(r.diagnostics[0].code, "E-IMM");
+        assert!(r.diagnostics[0].message.contains("0 and 31"));
+    }
+
+    #[test]
+    fn rv64_wide_shift_validation() {
+        let r = asm64("slli a0, a1, 64\n");
+        assert!(r.has_errors());
+        assert!(r.diagnostics[0].message.contains("0 and 63"));
+        // The *iw shift immediates stay 5-bit even in RV64.
+        let r = asm64("slliw a0, a1, 32\n");
+        assert!(r.has_errors());
+        let r = asm64("slliw a0, a1, 31\n");
+        assert!(!r.has_errors());
+    }
+
+    #[test]
+    fn rv64_wide_li_matches_rars_template() {
+        // li t1, 1000000000000000 goes through RARS's PseudoOps-64.txt
+        // 8-instruction chain:
+        //   lui t1, 57; addiw t1, t1, -642; slli t1, t1, 11; addi t1, t1, 1318;
+        //   slli t1, t1, 11; addi t1, t1, 416; slli t1, t1, 10; addi t1, t1, 0
+        // (h = 0x38D7E, l = 0xA4C68000 per the LIA/LIB/LIC/LID/LIE formulas).
+        let r = asm64("li t1, 1000000000000000\n");
+        assert!(!r.has_errors(), "diags: {:?}", r.diagnostics);
+        let p = r.program.unwrap();
+        assert_eq!(p.statements.len(), 8);
+        let want = [
+            0x0003_9337, // lui t1, 57
+            0xd7e3_031b, // addiw t1, t1, -642
+            0x00b3_1313, // slli t1, t1, 11
+            0x5263_0313, // addi t1, t1, 1318
+            0x00b3_1313, // slli t1, t1, 11
+            0x1a03_0313, // addi t1, t1, 416
+            0x00a3_1313, // slli t1, t1, 10
+            0x0003_0313, // addi t1, t1, 0
+        ];
+        for (i, w) in want.iter().enumerate() {
+            assert_eq!(p.statements[i].encoding, *w, "statement {i}");
+        }
+        // A negative wide constant exercises the LIA sign compensation:
+        // h = -232831 (0xFFFC7281), bit 11 clear, so LIA = h>>12 = -57
+        // carried as the 20-bit 0xFFFC7 and LIB = +641.
+        let r = asm64("li t1, -1000000000000000\n");
+        assert!(!r.has_errors(), "diags: {:?}", r.diagnostics);
+        let p = r.program.unwrap();
+        assert_eq!(p.statements.len(), 8);
+        assert_eq!(p.statements[0].encoding, 0xfffc_7337); // lui t1, 0xfffc7
+        assert_eq!(p.statements[1].encoding, 0x2813_031b); // addiw t1, t1, 641
+    }
+
+    #[test]
+    fn rv64_li_tiers() {
+        // 12-bit: single addi, same as RV32.
+        let r = asm64("li a0, 2047\nli a1, -2048\n");
+        assert!(!r.has_errors());
+        assert_eq!(r.program.unwrap().statements.len(), 2);
+        // 32-bit tier: lui + addiw (PseudoOps-64.txt overrides addi with
+        // addiw because "addi is not correct and addiw does not work in rv32").
+        let r = asm64("li a0, 2048\nli a1, 10000000\nli a2, 2147483647\nli a3, -2147483648\n");
+        assert!(!r.has_errors(), "diags: {:?}", r.diagnostics);
+        let p = r.program.unwrap();
+        assert_eq!(p.statements.len(), 8);
+        // lui a0, 1; addiw a0, a0, -2048: 2048 = 0x800, lo sign-extends to
+        // -2048 so hi compensates to 1.
+        assert_eq!(p.statements[0].encoding, 0x0000_1537); // lui a0, 1
+        assert_eq!(p.statements[1].encoding, 0x8005_051b); // addiw a0, a0, -2048
+        // 64-bit tier kicks in outside the signed 32-bit range.
+        let r = asm64("li a0, 2147483648\nli a1, -2147483649\n");
+        assert!(!r.has_errors(), "diags: {:?}", r.diagnostics);
+        assert_eq!(r.program.unwrap().statements.len(), 16);
+    }
+
+    #[test]
+    fn rv32_li_expansion_unchanged() {
+        // In RV32 the 32-bit tier keeps lui+addi (byte-identical to before).
+        let r = asm("li a1, 0x12345678\n");
+        assert!(!r.has_errors());
+        let p = r.program.unwrap();
+        assert_eq!(p.statements.len(), 2);
+        assert_eq!(p.statements[0].encoding, 0x1234_55b7);
+        assert_eq!(p.statements[1].encoding, 0x6785_8593);
+    }
+
+    #[test]
+    fn rv64_label_form_load_uses_ld() {
+        let r = asm64(".data\nv: .word 7\n.text\nld a0, v\nsd a0, v\n");
+        assert!(!r.has_errors(), "diags: {:?}", r.diagnostics);
+        let p = r.program.unwrap();
+        assert_eq!(p.statements.len(), 4); // lui+ld, lui+sd
+        assert_eq!(p.statements[1].basic_text.as_ref(), "ld a0, %lo(v)(ra)");
+        assert_eq!(p.statements[3].basic_text.as_ref(), "sd a0, %lo(v)(ra)");
+    }
+
+    #[test]
+    fn rv64_la_matches_rv32() {
+        // Addresses still live in the low 4 GB, so la stays the 2-instruction
+        // lui %hi + addi %lo pair with identical encodings in both modes.
+        let src = ".data\nmsg: .asciz \"Hi\"\n.text\nla a0, msg\n";
+        let p32 = asm(src).program.unwrap();
+        let p64 = asm64(src).program.unwrap();
+        assert_eq!(p32.statements.len(), 2);
+        assert_eq!(p64.statements.len(), 2);
+        for (a, b) in p32.statements.iter().zip(&p64.statements) {
+            assert_eq!(a.encoding, b.encoding);
+            assert_eq!(a.basic_text, b.basic_text);
+        }
     }
 }

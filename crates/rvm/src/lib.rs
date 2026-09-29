@@ -22,6 +22,12 @@ use std::collections::{BTreeSet, VecDeque};
 #[derive(Debug, Clone, Default)]
 pub struct MachineConfig {
     pub layout: MemLayout,
+    /// Run the integer ISA at 64-bit width (RARS's RV64 setting; the default
+    /// is RV32, as in RARS). Registers hold full 64-bit values, branches and
+    /// compares are 64-bit, the RV64-only instructions execute (`ld`, `sd`,
+    /// `lwu`, the `*w` ops, 64-bit FP conversions), and `lui`/`auipc`
+    /// sign-extend their immediates. The memory map, MMIO, syscalls, and
+    /// breakpoint/backstep behavior are identical in both modes.
     pub rv64: bool,
     /// Allow unaligned loads/stores (RARS errors on them by default).
     pub allow_unaligned: bool,
@@ -317,6 +323,12 @@ impl Machine {
 
     pub fn layout(&self) -> &MemLayout {
         &self.layout
+    }
+
+    /// True when the machine executes the 64-bit ISA (register width for
+    /// arithmetic, compares, and the RV64-only instructions).
+    pub fn rv64(&self) -> bool {
+        self.config.rv64
     }
 
     /// Read memory bytes for data views (no side effects).
@@ -752,6 +764,20 @@ pub(crate) mod testutil {
     pub fn machine(src: &str) -> Machine {
         machine_with(src, Box::new(ScriptHost::default()))
     }
+
+    /// Assemble and simulate in RV64 mode (RARS's 64-bit setting).
+    pub fn machine64_with(src: &str, host: Box<dyn Host>) -> Machine {
+        let files = vec![rvasm::InputFile { name: "t.s".into(), source: src.into() }];
+        let acfg = rvasm::AsmConfig { rv64: true, ..rvasm::AsmConfig::default() };
+        let r = rvasm::assemble(&files, &acfg);
+        assert!(!r.has_errors(), "diags: {:?}", r.diagnostics);
+        let mcfg = MachineConfig { rv64: true, ..MachineConfig::default() };
+        Machine::new(r.program.unwrap(), host, mcfg)
+    }
+
+    pub fn machine64(src: &str) -> Machine {
+        machine64_with(src, Box::new(ScriptHost::default()))
+    }
 }
 
 #[cfg(test)]
@@ -1003,5 +1029,105 @@ loop:
         assert_eq!(&buf, b"barbaz\0");
         // Strings and the pointer array live below the initial $sp.
         assert!(strings.iter().chain(&[argv]).all(|a| *a < 0x7fff_fffc));
+    }
+
+    // ---- RV64 mode ----
+
+    #[test]
+    fn rv64_print_int_uses_low_32_bits() {
+        // RARS's RV64 syscall convention: integer inputs come from the low
+        // 32 bits of a0 and results sign-extend into it.
+        let src = "\
+    li t0, 1
+    slli t0, t0, 32
+    li a0, 65
+    or a0, a0, t0           # 0x1_0000_0041
+    li a7, 1
+    ecall                   # prints the low 32 bits only
+    li a0, -1
+    li a7, 36
+    ecall                   # PrintIntUnsigned of 0xffffffff
+    li a7, 10
+    ecall
+";
+        let host = ScriptHost::default();
+        let mut m = machine64_with(src, Box::new(host.clone()));
+        m.run(None);
+        assert_eq!(host.take_output(), "654294967295");
+    }
+
+    #[test]
+    fn rv64_read_int_sign_extends_result() {
+        let src = "\
+    li a7, 5
+    ecall
+    li a7, 1
+    ecall
+    li a7, 10
+    ecall
+";
+        let host = ScriptHost::with_input(vec!["42".into()]);
+        let mut m = machine64_with(src, Box::new(host));
+        m.run(None);
+        assert_eq!(m.reg(10), 42);
+        // And a negative value sign-extends to the full 64-bit width.
+        let host = ScriptHost::with_input(vec!["-7".into()]);
+        let mut m = machine64_with(src, Box::new(host));
+        m.run(None);
+        assert_eq!(m.reg(10), (-7i64) as u64);
+    }
+
+    #[test]
+    fn rv64_end_to_end_64bit_program() {
+        // Assembler (AsmConfig::rv64) + machine (MachineConfig::rv64): store
+        // two wide halves, load them back, add carrying past bit 32, and
+        // print the low word.
+        let src = "\
+.data
+vals: .word 0x22222222, 0x11111111   # one doubleword 0x1111111122222222
+      .word 1, 0                     # ...and one holding 1
+.text
+main:
+    la t2, vals
+    ld t0, 0(t2)
+    ld t1, 8(t2)
+    add a0, t0, t1          # 0x1111111122222223
+    sd a0, 8(t2)
+    ld a1, 8(t2)
+    li a7, 1
+    mv a0, a1
+    ecall                   # prints low 32 bits: 0x22222223 = 572662307
+    li a7, 10
+    ecall
+";
+        let host = ScriptHost::default();
+        let mut m = machine64_with(src, Box::new(host.clone()));
+        let events = m.run(None);
+        assert_eq!(m.exit_code(), Some(0));
+        assert_eq!(events.last(), Some(&Event::Halted(Halt::Exit { code: 0 })));
+        assert_eq!(m.reg(11), 0x1111_1111_2222_2223);
+        assert_eq!(host.take_output(), "572662307");
+    }
+
+    #[test]
+    fn rv64_backstep_restores_wide_values() {
+        let src = "\
+    li t0, 1000000000000000
+    addi t0, t0, 1
+    sd t0, -4(sp)
+";
+        let mut m = machine64(src);
+        m.step();
+        for _ in 1..8 {
+            m.step(); // finish the wide li chain
+        }
+        assert_eq!(m.reg(5), 1_000_000_000_000_000);
+        m.step(); // addi
+        assert_eq!(m.reg(5), 1_000_000_000_000_001);
+        m.step(); // sd
+        assert!(m.backstep());
+        assert_eq!(m.reg(5), 1_000_000_000_000_001); // store undone, reg kept
+        assert!(m.backstep());
+        assert_eq!(m.reg(5), 1_000_000_000_000_000);
     }
 }

@@ -66,6 +66,8 @@ struct Shared {
     diagnostic_spans: RefCell<Vec<rvasm::SourcePos>>,
     /// Base address the Memory tab is viewing.
     memory_base: RefCell<u32>,
+    /// RV64 mode for assemble and execution (default RV32, like RARS).
+    rv64: RefCell<bool>,
 }
 
 /// Every widget the behavior code needs, kept by handle. wxDragon handles are
@@ -143,6 +145,7 @@ fn main() {
             assembled: RefCell::new(None),
             diagnostic_spans: RefCell::new(Vec::new()),
             memory_base: RefCell::new(0x1001_0000),
+            rv64: RefCell::new(false),
         });
         let narrator = Rc::new(Narrator::new());
 
@@ -930,7 +933,10 @@ fn do_assemble(widgets: &Widgets, shared: &Shared, narrator: &Narrator, cmd_tx: 
         .and_then(|p| std::path::Path::new(p).file_name().map(|f| f.to_string_lossy().into_owned()))
         .unwrap_or_else(|| "main.s".to_string());
     let files = vec![rvasm::InputFile { name, source: text }];
-    let result = rvasm::assemble(&files, &rvasm::AsmConfig::default());
+    let result = rvasm::assemble(
+        &files,
+        &rvasm::AsmConfig { rv64: *shared.rv64.borrow(), ..rvasm::AsmConfig::default() },
+    );
 
     widgets.messages.delete_all_items();
     *shared.diagnostic_spans.borrow_mut() =
@@ -966,7 +972,7 @@ fn do_assemble(widgets: &Widgets, shared: &Shared, narrator: &Narrator, cmd_tx: 
             widgets
                 .status_bar
                 .set_status_text(&format!("Assembled, {} instructions. Ready to run.", program.statements.len()), 0);
-            cmd_tx.send(Cmd::Load(Box::new(program))).ok();
+            cmd_tx.send(Cmd::Load(Box::new(program), *shared.rv64.borrow())).ok();
         }
     } else {
         widgets.status_bar.set_status_text("Assembly failed; see Assembler Messages", 0);
@@ -1097,10 +1103,25 @@ fn show_settings_dialog(frame: &Frame, shared: &Rc<Shared>) {
     verbosity_row.add(&verbosity, 1, SizerFlag::Expand | SizerFlag::All, 4);
     sizer.add_sizer(&verbosity_row, 0, SizerFlag::Expand, 0);
 
+    let xlen_label = StaticText::builder(&panel).with_label("Instruction set:").build();
+    let xlen = Choice::builder(&panel)
+        .with_choices(vec!["RV32 (default)".to_string(), "RV64".to_string()])
+        .with_selection(Some(if *shared.rv64.borrow() { 1 } else { 0 }))
+        .build();
+    xlen.set_accessibility_label("Instruction set");
+    xlen.set_accessibility_description(
+        "RV32 or RV64; applies the next time you assemble. RV64 stack operations should keep eight byte alignment",
+    );
+    let xlen_row = BoxSizer::builder(Orientation::Horizontal).build();
+    xlen_row.add(&xlen_label, 0, SizerFlag::AlignCenterVertical | SizerFlag::All, 4);
+    xlen_row.add(&xlen, 1, SizerFlag::Expand | SizerFlag::All, 4);
+    sizer.add_sizer(&xlen_row, 0, SizerFlag::Expand, 0);
+
     let close_btn = Button::builder(&panel).with_label("Close").build();
     close_btn.set_accessibility_label("Close settings");
     let dlg = dialog;
     let choice = verbosity;
+    let xlen_choice = xlen;
     let sh = shared.clone();
     close_btn.on_click(move |_| {
         if let Some(sel) = choice.get_selection() {
@@ -1109,6 +1130,9 @@ fn show_settings_dialog(frame: &Frame, shared: &Rc<Shared>) {
                 1 => Verbosity::Brief,
                 _ => Verbosity::Verbose,
             };
+        }
+        if let Some(sel) = xlen_choice.get_selection() {
+            *sh.rv64.borrow_mut() = sel == 1;
         }
         dlg.end_modal(ID_OK);
     });

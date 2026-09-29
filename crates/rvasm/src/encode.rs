@@ -1,5 +1,6 @@
-//! Instruction definitions and bit encoders for RV32I, M, and the F/D
-//! floating-point extensions (RV64 land on this table in later phases).
+//! Instruction definitions and bit encoders for RV32I/M/F/D plus the
+//! RV64-only additions (marked `rv64_only`, accepted when `AsmConfig::rv64`
+//! is set).
 
 /// Operand kinds an instruction accepts, in order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -77,11 +78,21 @@ pub struct InstructionInfo {
     /// Fixed rs2 field for the single-source FP forms (e.g. `fcvt.wu.s`
     /// carries rs2 = 1); unused otherwise.
     pub rs2_fixed: u8,
+    /// True for instructions the base ISA only defines in 64-bit mode
+    /// (`ld`/`sd`/`lwu`, the `*w` ops, the 64-bit FP conversions). The
+    /// assembler rejects these with E-XLEN unless `AsmConfig::rv64` is set.
+    pub rv64_only: bool,
 }
 
 impl InstructionInfo {
     const fn new(name: &'static str, format: Format, opcode: u32, funct3: u32, funct7: u32) -> Self {
-        InstructionInfo { name, format, kind: InstrKind::Int, opcode, funct3, funct7, rs2_fixed: 0 }
+        InstructionInfo { name, format, kind: InstrKind::Int, opcode, funct3, funct7, rs2_fixed: 0, rv64_only: false }
+    }
+
+    /// RV64-only integer instruction: same layout as `new`, flagged so the
+    /// assembler can gate it to 64-bit mode.
+    const fn new64(name: &'static str, format: Format, opcode: u32, funct3: u32, funct7: u32) -> Self {
+        InstructionInfo { rv64_only: true, ..Self::new(name, format, opcode, funct3, funct7) }
     }
 
     /// FP instruction: `funct3` is either the operation selector or the
@@ -97,12 +108,30 @@ impl InstructionInfo {
         funct7: u32,
         rs2_fixed: u8,
     ) -> Self {
-        InstructionInfo { name, format, kind, opcode, funct3, funct7, rs2_fixed }
+        InstructionInfo { name, format, kind, opcode, funct3, funct7, rs2_fixed, rv64_only: false }
+    }
+
+    /// RV64-only FP instruction (64-bit int↔float conversions, double
+    /// bit-moves), flagged so the assembler can gate it to 64-bit mode.
+    const fn new_fp64(
+        name: &'static str,
+        format: Format,
+        kind: InstrKind,
+        opcode: u32,
+        funct3: u32,
+        funct7: u32,
+        rs2_fixed: u8,
+    ) -> Self {
+        InstructionInfo { rv64_only: true, ..Self::new_fp(name, format, kind, opcode, funct3, funct7, rs2_fixed) }
     }
 }
 
 pub const OP: u32 = 0x33;
 pub const OP_IMM: u32 = 0x13;
+/// RV64 OP-IMM-32 (`addiw`, the `*iw` shift immediates).
+pub const OP_IMM_32: u32 = 0x1b;
+/// RV64 OP-32 (`addw`/`subw`/`sllw`/`srlw`/`sraw` and the M `w`-suffixes).
+pub const OP_32: u32 = 0x3b;
 pub const LOAD: u32 = 0x03;
 pub const STORE: u32 = 0x23;
 /// FP loads/stores use their own major opcodes, not the integer ones.
@@ -240,6 +269,41 @@ pub static INSTRUCTIONS: &[InstructionInfo] = &[
     // ---- Precision conversions ----
     InstructionInfo::new_fp("fcvt.s.d", Format::R2, InstrKind::FpSingle, FP, 0, 0x20, 0),
     InstructionInfo::new_fp("fcvt.d.s", Format::R2, InstrKind::FpSingle, FP, 0, 0x21, 0),
+    // ---- RV64-only instructions (gated by AsmConfig::rv64) ----
+    // Doubleword loads/stores and the unsigned word load.
+    InstructionInfo::new64("ld", Format::I, LOAD, 3, 0),
+    InstructionInfo::new64("lwu", Format::I, LOAD, 6, 0),
+    InstructionInfo::new64("sd", Format::S, STORE, 3, 0),
+    // Word-width arithmetic: compute the low 32 bits, sign-extend to 64.
+    // OP-IMM-32/OP-32 are their own major opcodes (0x1b / 0x3b).
+    InstructionInfo::new64("addiw", Format::I, OP_IMM_32, 0, 0),
+    InstructionInfo::new64("slliw", Format::I, OP_IMM_32, 1, 0x00),
+    InstructionInfo::new64("srliw", Format::I, OP_IMM_32, 5, 0x00),
+    InstructionInfo::new64("sraiw", Format::I, OP_IMM_32, 5, 0x20),
+    InstructionInfo::new64("addw", Format::R, OP_32, 0, 0x00),
+    InstructionInfo::new64("subw", Format::R, OP_32, 0, 0x20),
+    InstructionInfo::new64("sllw", Format::R, OP_32, 1, 0x00),
+    InstructionInfo::new64("srlw", Format::R, OP_32, 5, 0x00),
+    InstructionInfo::new64("sraw", Format::R, OP_32, 5, 0x20),
+    // M-extension w-suffixes: same R layout, funct7 0x01 on OP-32.
+    InstructionInfo::new64("mulw", Format::R, OP_32, 0, 0x01),
+    InstructionInfo::new64("divw", Format::R, OP_32, 4, 0x01),
+    InstructionInfo::new64("divuw", Format::R, OP_32, 5, 0x01),
+    InstructionInfo::new64("remw", Format::R, OP_32, 6, 0x01),
+    InstructionInfo::new64("remuw", Format::R, OP_32, 7, 0x01),
+    // 64-bit FP conversions: rs2 = 2 selects the signed 64-bit form and
+    // rs2 = 3 the unsigned one; float→int keeps RTZ, int→float RNE.
+    InstructionInfo::new_fp64("fcvt.l.s", Format::R2, InstrKind::FpToI, FP, 1, 0x60, 2),
+    InstructionInfo::new_fp64("fcvt.lu.s", Format::R2, InstrKind::FpToI, FP, 1, 0x60, 3),
+    InstructionInfo::new_fp64("fcvt.l.d", Format::R2, InstrKind::FpToI, FP, 1, 0x61, 2),
+    InstructionInfo::new_fp64("fcvt.lu.d", Format::R2, InstrKind::FpToI, FP, 1, 0x61, 3),
+    InstructionInfo::new_fp64("fcvt.s.l", Format::R2, InstrKind::FpToX, FP, 0, 0x68, 2),
+    InstructionInfo::new_fp64("fcvt.s.lu", Format::R2, InstrKind::FpToX, FP, 0, 0x68, 3),
+    InstructionInfo::new_fp64("fcvt.d.l", Format::R2, InstrKind::FpToX, FP, 0, 0x69, 2),
+    InstructionInfo::new_fp64("fcvt.d.lu", Format::R2, InstrKind::FpToX, FP, 0, 0x69, 3),
+    // Double bit-moves (funct7 carries the .d format bit).
+    InstructionInfo::new_fp64("fmv.x.d", Format::R2, InstrKind::FpToI, FP, 0, 0x71, 0),
+    InstructionInfo::new_fp64("fmv.d.x", Format::R2, InstrKind::FpToX, FP, 0, 0x79, 0),
 ];
 
 pub fn lookup(name: &str) -> Option<&'static InstructionInfo> {
@@ -501,5 +565,64 @@ mod tests {
         assert_eq!(decode::imm_for(w), -4);
         let w = enc("jal", &[0, 2046]);
         assert_eq!(decode::imm_for(w), 2046);
+    }
+
+    #[test]
+    fn rv64_load_store_encodings() {
+        // ld a0, 8(sp): LOAD funct3 3
+        assert_eq!(enc("ld", &[10, 2, 8]), 0x0081_3503);
+        // lwu a0, 8(sp): LOAD funct3 6 (zero-extending word load)
+        assert_eq!(enc("lwu", &[10, 2, 8]), 0x0081_6503);
+        // sd a0, 8(sp): STORE funct3 3
+        assert_eq!(enc("sd", &[2, 10, 8]), 0x00a1_3423);
+    }
+
+    #[test]
+    fn rv64_word_op_encodings() {
+        // addiw a0, a1, 5: OP-IMM-32 (0x1b) funct3 0
+        assert_eq!(enc("addiw", &[10, 11, 5]), 0x0055_851b);
+        // addw a1, a2, a3: OP-32 (0x3b) funct7 0x00
+        assert_eq!(enc("addw", &[11, 12, 13]), 0x00d6_05bb);
+        assert_eq!(enc("subw", &[11, 12, 13]), 0x40d6_05bb);
+        assert_eq!(enc("sllw", &[11, 12, 13]), 0x00d6_15bb);
+        assert_eq!(enc("srlw", &[11, 12, 13]), 0x00d6_55bb);
+        assert_eq!(enc("sraw", &[11, 12, 13]), 0x40d6_55bb);
+        // M w-suffixes: funct7 0x01 on OP-32.
+        assert_eq!(enc("mulw", &[11, 12, 13]), 0x02d6_05bb);
+        assert_eq!(enc("divw", &[11, 12, 13]), 0x02d6_45bb);
+        assert_eq!(enc("divuw", &[11, 12, 13]), 0x02d6_55bb);
+        assert_eq!(enc("remw", &[11, 12, 13]), 0x02d6_65bb);
+        assert_eq!(enc("remuw", &[11, 12, 13]), 0x02d6_75bb);
+    }
+
+    #[test]
+    fn rv64_wide_shift_immediates() {
+        // Like the 32-bit goldens, the raw encoder takes the full imm12:
+        // funct7 in imm[11:5] (imm[11:6] in RV64) plus the shamt.
+        // slli a0, a1, 33: shamt rides in imm[5:0] in RV64
+        assert_eq!(enc("slli", &[10, 11, 0x021]), 0x0215_9513);
+        // srai a0, a1, 40: funct6 010000 in imm[11:6], shamt[5] set
+        assert_eq!(enc("srai", &[10, 11, 0x428]), 0x4285_d513);
+        assert_eq!(enc("srli", &[10, 11, 0x03f]), 0x03f5_d513);
+        // The *iw shift immediates stay 5-bit even in RV64.
+        assert_eq!(enc("slliw", &[10, 11, 0x01f]), 0x01f5_951b);
+        assert_eq!(enc("sraiw", &[10, 11, 0x403]), 0x4035_d51b);
+    }
+
+    #[test]
+    fn rv64_fp_conversion_encodings() {
+        // fcvt.l.s a0, f1: funct7 1100000, rs2 2, rm RTZ.
+        assert_eq!(enc("fcvt.l.s", &[10, 1]), 0xc020_9553);
+        assert_eq!(enc("fcvt.lu.s", &[10, 1]), 0xc030_9553);
+        assert_eq!(enc("fcvt.l.d", &[10, 1]), 0xc220_9553);
+        assert_eq!(enc("fcvt.lu.d", &[10, 1]), 0xc230_9553);
+        // Int→float forms take RNE like their 32-bit siblings.
+        assert_eq!(enc("fcvt.s.l", &[1, 10]), 0xd025_00d3);
+        assert_eq!(enc("fcvt.s.lu", &[1, 10]), 0xd035_00d3);
+        assert_eq!(enc("fcvt.d.l", &[1, 10]), 0xd225_00d3);
+        assert_eq!(enc("fcvt.d.lu", &[1, 10]), 0xd235_00d3);
+        // Double bit-moves: funct7 1110001 / 1111001 carry the format bit.
+        assert_eq!(enc("fmv.x.d", &[10, 1]), 0xe200_8553);
+        assert_eq!(enc("fmv.d.x", &[1, 10]), 0xf205_00d3);
     }
 }

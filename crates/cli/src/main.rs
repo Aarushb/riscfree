@@ -11,6 +11,7 @@ fn main() -> ExitCode {
     let mut run = false;
     let mut max_steps: Option<u64> = None;
     let mut dump_regs = false;
+    let mut rv64 = false;
     let mut prog_args: Vec<String> = Vec::new();
 
     let mut i = 0usize;
@@ -29,6 +30,7 @@ fn main() -> ExitCode {
                     return ExitCode::from(1);
                 }
             }
+            "--rv64" => rv64 = true,
             "--dump-regs" => dump_regs = true,
             "--" => {
                 prog_args = args[i + 1..].to_vec();
@@ -50,7 +52,7 @@ fn main() -> ExitCode {
         return ExitCode::from(1);
     }
 
-    let result = rvasm::assemble(&files, &AsmConfig::default());
+    let result = rvasm::assemble(&files, &AsmConfig { rv64, ..AsmConfig::default() });
     for d in &result.diagnostics {
         let file = files[d.pos.file].name.as_str();
         let code = d.code;
@@ -72,7 +74,11 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
-    let mut machine = Machine::new(program, Box::new(StdHost::default()), MachineConfig::default());
+    let mut machine = Machine::new(
+        program,
+        Box::new(StdHost::default()),
+        MachineConfig { rv64, ..MachineConfig::default() },
+    );
     if !prog_args.is_empty() {
         machine.set_program_args(&prog_args);
     }
@@ -114,7 +120,8 @@ fn print_help() {
          options:\n\
            --run         assemble and execute\n\
            --max-steps N stop after N instructions\n\
-           --dump-regs   print non-zero registers after the run\n\
+           --dump-regs   print non-zero registers after the run
+           --rv64        assemble and execute as RV64\n\
          the program's console output goes to stdout; input comes from stdin."
     );
 }
