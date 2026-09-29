@@ -8,6 +8,7 @@
 //! widgets themselves.
 
 mod bridge;
+mod tools;
 
 #[cfg(target_os = "windows")]
 use wxdragon::accessible::AccRole;
@@ -37,6 +38,7 @@ const ID_RUN_STOP: Id = 2006;
 const ID_RUN_RESET: Id = 2007;
 const ID_RUN_TOGGLE_BREAK: Id = 2009;
 const ID_SHORTCUTS: Id = 3001;
+const ID_TOOL_BITMAP: Id = 4001;
 const ID_ABOUT: Id = 3002;
 
 const SAMPLE_RISCV: &str = "\
@@ -168,6 +170,8 @@ fn main() {
         let (evt_tx, evt_rx) = std::sync::mpsc::channel::<Evt>();
         let (input_tx, input_rx) = std::sync::mpsc::channel::<String>();
         let input: InputChannel = std::sync::Arc::new(std::sync::Mutex::new(input_rx));
+        let memory_listeners: tools::MemoryListeners = Rc::new(std::cell::RefCell::new(Vec::new()));
+        let listener_tags = Rc::new(std::cell::RefCell::new(1u32)); // tag 0 = Memory tab
         std::thread::Builder::new()
             .name("sim".into())
             .spawn(move || start_sim_thread(cmd_rx, evt_tx, input))
@@ -296,7 +300,7 @@ fn main() {
                 let text = w.memory_addr.get_value().trim().trim_start_matches("0x").to_string();
                 if let Ok(addr) = u32::from_str_radix(&text, 16) {
                     *sh.memory_base.borrow_mut() = addr;
-                    tx.send(Cmd::ReadMemory { addr, len: 512 }).ok();
+                    tx.send(Cmd::ReadMemory { addr, len: 512, tag: 0 }).ok();
                 } else {
                     w.status_bar.set_status_text("Memory address must be hexadecimal", 0);
                 }
@@ -338,7 +342,14 @@ fn main() {
             });
         }
 
-        bind_menu_events(&widgets, &shared, &narrator, &cmd_tx);
+        bind_menu_events(
+            &widgets,
+            &shared,
+            &narrator,
+            &cmd_tx,
+            &memory_listeners,
+            &listener_tags,
+        );
 
         // --- Event pump: simulation events -> views and narrator -------------
         // Driven by idle events: wxDragon's frame-owned wxTimer binding does
@@ -351,13 +362,16 @@ fn main() {
             let sh = shared.clone();
             let nar = narrator.clone();
             let tx = cmd_tx.clone();
+            let listeners = memory_listeners.clone();
             frame.on_idle(move |idle| {
                 if let WindowEventData::Idle(idle) = idle {
                     idle.request_more(true);
                 }
                 std::thread::sleep(std::time::Duration::from_millis(5));
                 while let Ok(evt) = evt_rx.try_recv() {
-                    handle_sim_event(&w, &sh, &nar, &tx, evt);
+                    if !tools::route_memory_event(&listeners, &evt) {
+                        handle_sim_event(&w, &sh, &nar, &tx, evt);
+                    }
                 }
             });
         }
@@ -530,9 +544,9 @@ fn handle_sim_event(
             mark_program_pc(w, pc);
             w.status_bar.set_status_text(&format!("pc 0x{pc:08x}, {instret} executed"), 1);
             let base = *shared.memory_base.borrow();
-            tx.send(Cmd::ReadMemory { addr: base, len: 512 }).ok();
+            tx.send(Cmd::ReadMemory { addr: base, len: 512, tag: 0 }).ok();
         }
-        Evt::Memory { base, bytes } => {
+        Evt::Memory { base, bytes, tag: _ } => {
             rebuild_memory_rows(base, &bytes);
             let count = MEMORY_ROWS.with(|rows| rows.borrow().len() as i64);
             w.memory_list.set_item_count(count);
@@ -662,6 +676,10 @@ fn build_menu_bar() -> MenuBar {
         .append_item(ID_RUN_RESET, "R&eset\tF12", "Reset the program to its initial state")
         .build();
 
+    let tools_menu = Menu::builder()
+        .append_item(ID_TOOL_BITMAP, "&Bitmap Display", "Watch memory as a pixel grid, with a textual view of every row")
+        .build();
+
     let help_menu = Menu::builder()
         .append_item(ID_SHORTCUTS, "&Keyboard Shortcuts\tF1", "Show keyboard shortcuts")
         .append_separator()
@@ -671,6 +689,7 @@ fn build_menu_bar() -> MenuBar {
     MenuBar::builder()
         .append(file_menu, "&File")
         .append(run_menu, "&Run")
+        .append(tools_menu, "&Tools")
         .append(help_menu, "&Help")
         .build()
 }
@@ -954,7 +973,17 @@ fn do_assemble(widgets: &Widgets, shared: &Shared, narrator: &Narrator, cmd_tx: 
     }
 }
 
-fn bind_menu_events(widgets: &Widgets, shared: &std::rc::Rc<Shared>, narrator: &std::rc::Rc<Narrator>, cmd_tx: &Sender<Cmd>) {
+#[allow(clippy::too_many_arguments)]
+fn bind_menu_events(
+    widgets: &Widgets,
+    shared: &std::rc::Rc<Shared>,
+    narrator: &std::rc::Rc<Narrator>,
+    cmd_tx: &Sender<Cmd>,
+    memory_listeners: &tools::MemoryListeners,
+    listener_tags: &std::rc::Rc<std::cell::RefCell<u32>>,
+) {
+    let memory_listeners = std::rc::Rc::clone(memory_listeners);
+    let listener_tags = std::rc::Rc::clone(listener_tags);
     let fr = widgets.frame;
     let w = widgets.clone();
     let sh = std::rc::Rc::clone(shared);
@@ -1026,6 +1055,13 @@ fn bind_menu_events(widgets: &Widgets, shared: &std::rc::Rc<Shared>, narrator: &
             ID_RUN_STOP => { tx.send(Cmd::Pause).ok(); }
             ID_RUN_RESET => { tx.send(Cmd::Reset).ok(); }
             ID_RUN_TOGGLE_BREAK => toggle_selected_breakpoint(&w, &tx),
+            ID_TOOL_BITMAP => {
+                let tag = tools::next_tag(&listener_tags);
+                let listeners = memory_listeners.clone();
+                let tx2 = tx.clone();
+                let wake: Rc<dyn Fn()> = Rc::new(|| {});
+                tools::BitmapTool::open(tx2, listeners, tag, wake);
+            }
             ID_SHORTCUTS => show_shortcuts_dialog(&fr),
             ID_ABOUT => w.status_bar.set_status_text("AsAccess: an accessibility-first RISC-V IDE", 0),
             _ => {}
