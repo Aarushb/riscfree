@@ -654,6 +654,9 @@ dependencies = [
 [[package]]
 name = "narration"
 version = "0.1.0"
+dependencies = [
+ "rvm",
+]
 
 [[package]]
 name = "native-tls"
