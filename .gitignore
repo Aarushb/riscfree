@@ -32,3 +32,8 @@ desktop.ini
 /docs/TECH-SPEC.md
 /docs/research/
 /docs/spikes/
+
+# UIA probe artifacts
+/tests/uiauto/.venv/
+/tests/uiauto/*.log
+/tests/uiauto/uia_dump.txt

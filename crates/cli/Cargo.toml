@@ -7,3 +7,6 @@ license.workspace = true
 [dependencies]
 rvasm = { workspace = true }
 rvm = { workspace = true }
+
+[dev-dependencies]
+rvm = { workspace = true }
