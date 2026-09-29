@@ -1,12 +1,13 @@
 # Building AsAccess
 
-The workspace has two kinds of crates. The core (`rvasm`, `rvm`, `narration`, `asaccess-cli`) is pure Rust: `cargo test` just works. The GUI (`asaccess`) and speech (`speech`) layers wrap native libraries and need the toolchain below on Windows. Everything is project-scoped; nothing installs machine-wide.
+The workspace has two kinds of crates. The core (`rvasm`, `rvm`, `narration`, `asaccess-cli`) is pure Rust: `cargo test` just works. The GUI (`asaccess`) and speech (`speech`) layers wrap native libraries and need the toolchain below on Windows. Everything is project-scoped; nothing installs machine-wide beyond the standard VS Build Tools workload.
 
 ## Prerequisites
 
-- Rust (MSVC toolchain) and Visual Studio Build Tools with the C++ workload. The bundled CMake and Ninja are used from the Build Tools directory, so the standalone CMake install is not needed.
+- Rust (MSVC toolchain) and Visual Studio Build Tools with the C++ workload plus the C++ ATL component (Prism's JAWS/SAPI/ZoomText backends include `atlbase.h`).
 - [uv](https://docs.astral.sh/uv/) for the Python-side tooling (the UIA test probe and the libclang wheel).
 - Python 3.12+ (uv can fetch it).
+- CMake and Ninja: the copies bundled with Build Tools work (see the PATH entries below); no standalone install needed.
 
 ## One-time setup
 
@@ -17,19 +18,16 @@ The workspace has two kinds of crates. The core (`rvasm`, `rvm`, `narration`, `a
    uv pip install --python tests/uiauto/.venv/Scripts/python.exe libclang pywinauto comtypes
    ```
 
-2. Build Prism (the screen reader bridge) with the backends that do not need the ATL SDK, and install it inside `target/`:
+2. Build Prism (the screen reader bridge) and install it inside `target/`:
 
    ```bash
    cmake -S "$CARGO_HOME/registry/src/<registry>/prism-sys-<ver>/prism" \
          -B target/prism-build \
-         -DPRISM_ENABLE_SAPI_BACKEND=OFF -DPRISM_ENABLE_JAWS_BACKEND=OFF \
-         -DPRISM_ENABLE_ZOOM_TEXT_BACKEND=OFF -DPRISM_ENABLE_SENSE_READER_BACKEND=OFF \
-         -DPRISM_ENABLE_WINDOW_EYES_BACKEND=OFF \
          -DCMAKE_INSTALL_PREFIX="$(pwd)/target/prism-install"
    cmake --build target/prism-build --config Release --target install --parallel
    ```
 
-   The off backends are exactly the ones that include `atlbase.h`. The remaining set (NVDA, OneCore, UIA, PCTalker, ZDSR, BoyPCReader) covers NVDA and Windows system voices, which is the shipping target for Windows; JAWS and SAPI come back if the VS ATL component gets installed.
+   This builds every backend the platform supports (NVDA, JAWS, SAPI, OneCore, UIA and friends).
 
 3. Per shell session, before building the GUI or speech crates:
 
@@ -47,4 +45,4 @@ A `scripts/dev-env.ps1` may automate step 3 later; for now this file is the sour
 
 - `cargo test` covers the core crates with no special environment.
 - `cargo run -p speech --features prism --example probe` (with the step 3 environment) speaks a test phrase through the active screen reader and prints the backends Prism found.
-- `cargo run -p asaccess` opens the GUI skeleton; NVDA and JAWS should read every control.
+- `cargo run -p asaccess` opens the GUI; NVDA and JAWS should read every control.
