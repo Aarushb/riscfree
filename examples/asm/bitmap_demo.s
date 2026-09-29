@@ -1,6 +1,6 @@
 # Bitmap demo: paint a red/green checkerboard at the default bitmap base.
 # Open Tools > Bitmap Display, base 10010000, 16x16, then run.
-    .equ BASE, 0x10010000
+    .eqv BASE 0x10010000
     .text
     .globl main
 main:
