@@ -35,6 +35,7 @@ const ID_RUN_BACKSTEP: Id = 2004;
 const ID_RUN_PAUSE: Id = 2005;
 const ID_RUN_STOP: Id = 2006;
 const ID_RUN_RESET: Id = 2007;
+const ID_RUN_TOGGLE_BREAK: Id = 2009;
 const ID_SHORTCUTS: Id = 3001;
 const ID_ABOUT: Id = 3002;
 
@@ -58,6 +59,9 @@ struct Shared {
     verbosity: RefCell<Verbosity>,
     program_path: RefCell<Option<String>>,
     assembled: RefCell<Option<rvasm::Program>>,
+    /// Source position of each row of the assembler messages list, for
+    /// Enter-to-jump.
+    diagnostic_spans: RefCell<Vec<rvasm::SourcePos>>,
 }
 
 /// Every widget the behavior code needs, kept by handle. wxDragon handles are
@@ -68,6 +72,7 @@ struct Widgets {
     status_bar: StatusBar,
     editor: StyledTextCtrl,
     register_list: ListCtrl,
+    program_list: ListCtrl,
     io_output: TextCtrl,
     io_input: TextCtrl,
     messages: ListCtrl,
@@ -129,6 +134,7 @@ fn main() {
             verbosity: RefCell::new(Verbosity::Brief),
             program_path: RefCell::new(None),
             assembled: RefCell::new(None),
+            diagnostic_spans: RefCell::new(Vec::new()),
         });
         let narrator = Rc::new(Narrator::new());
 
@@ -162,6 +168,7 @@ fn main() {
             .expect("spawn simulation thread");
 
         let panel = Panel::builder(&frame).build();
+        panel.set_accessibility_label("Main area");
         let main_sizer = BoxSizer::builder(Orientation::Vertical).build();
 
         // --- Run controls ---------------------------------------------------
@@ -188,8 +195,10 @@ fn main() {
         let h_splitter = SplitterWindow::builder(&panel)
             .with_style(SplitterWindowStyle::LiveUpdate | SplitterWindowStyle::Default)
             .build();
+        h_splitter.set_accessibility_label("Editor and state panes");
 
         let editor_panel = Panel::builder(&h_splitter).build();
+        editor_panel.set_accessibility_label("Editor pane");
         let editor_sizer = BoxSizer::builder(Orientation::Vertical).build();
         let editor = build_editor(&editor_panel);
         editor_sizer.add(&editor, 1, SizerFlag::Expand | SizerFlag::All, 2);
@@ -198,8 +207,10 @@ fn main() {
         let right_splitter = SplitterWindow::builder(&h_splitter)
             .with_style(SplitterWindowStyle::LiveUpdate | SplitterWindowStyle::Default)
             .build();
+        right_splitter.set_accessibility_label("Right side panes");
 
-        let (register_notebook, register_list) = build_register_views(&right_splitter);
+        let (register_notebook, register_list, program_list) =
+            build_state_views(&right_splitter);
         let (bottom_notebook, io_output, io_input, send_input, messages) =
             build_bottom_views(&right_splitter);
 
@@ -214,6 +225,7 @@ fn main() {
             status_bar,
             editor,
             register_list,
+            program_list,
             io_output,
             io_input,
             messages,
@@ -266,6 +278,29 @@ fn main() {
             }
         }
 
+        // Program list: Enter toggles a breakpoint on the selected row.
+        {
+            let w = widgets.clone();
+            let tx = cmd_tx.clone();
+            widgets.program_list.on_item_activated(move |event| {
+                let _ = event;
+                toggle_selected_breakpoint(&w, &tx);
+            });
+        }
+
+        // Assembler messages: Enter jumps the editor to the source line.
+        {
+            let w = widgets.clone();
+            let sh = shared.clone();
+            widgets.messages.on_item_activated(move |event| {
+                let row = event.get_item_index();
+                if let Some(pos) = sh.diagnostic_spans.borrow().get(row as usize) {
+                    w.editor.goto_line(pos.line as i32 - 1);
+                    w.editor.set_focus();
+                }
+            });
+        }
+
         // Program input: Send forwards one line to the machine.
         {
             let input_ctrl = widgets.io_input;
@@ -306,11 +341,106 @@ fn main() {
     });
 }
 
+/// Rebuild the Program tab rows from an assembled program.
+fn load_program_rows(program: &rvasm::Program) {
+    PROGRAM_ROWS.with(|rows| {
+        let mut rows = rows.borrow_mut();
+        rows.clear();
+        for s in &program.statements {
+            rows.push([
+                format!("0x{:08x}", s.addr),
+                format!("0x{:08x}", s.encoding),
+                s.basic_text.to_string(),
+                String::new(),
+                String::new(),
+            ]);
+        }
+    });
+    PROGRAM_ADDRS.with(|addrs| {
+        *addrs.borrow_mut() = program.statements.iter().map(|s| s.addr).collect();
+    });
+}
+
+/// Move the PC marker on the Program tab to the row at `pc`.
+fn mark_program_pc(w: &Widgets, pc: u32) {
+    let current = PROGRAM_ADDRS.with(|addrs| {
+        addrs
+            .borrow()
+            .iter()
+            .position(|a| *a == pc)
+            .map(|i| i as i64)
+    });
+    PROGRAM_ROWS.with(|rows| {
+        let mut rows = rows.borrow_mut();
+        for row in rows.iter_mut() {
+            row[4] = String::new();
+        }
+        if let Some(i) = current {
+            if let Some(row) = rows.get_mut(i as usize) {
+                row[4] = "PC".to_string();
+            }
+        }
+    });
+    let count = PROGRAM_ROWS.with(|rows| rows.borrow().len() as i64);
+    if count > 0 {
+        w.program_list.refresh_items(0, count - 1);
+        if let Some(i) = current {
+            w.program_list.ensure_visible(i);
+        }
+    }
+}
+
+/// Toggle the breakpoint on the selected Program row.
+fn toggle_selected_breakpoint(w: &Widgets, cmd_tx: &Sender<Cmd>) {
+    let mut index = w.program_list.get_first_selected_item();
+    if index < 0 {
+        // No selection: fall back to the row at the current PC, else the
+        // first instruction, which is what a keyboard user means by
+        // "current line" right after assembling.
+        index = PROGRAM_ROWS.with(|rows| {
+            rows.borrow()
+                .iter()
+                .position(|row| row[4] == "PC")
+                .map(|i| i as i32)
+                .unwrap_or(if rows.borrow().is_empty() { -1 } else { 0 })
+        });
+    }
+    if index < 0 {
+        return;
+    }
+    let addr_text = w.program_list.get_item_text(index as i64, 0);
+    let Ok(addr) = u32::from_str_radix(addr_text.trim_start_matches("0x"), 16) else {
+        return;
+    };
+    let on = w.program_list.get_item_text(index as i64, 3) != "on";
+    PROGRAM_ROWS.with(|rows| {
+        if let Some(row) = rows.borrow_mut().get_mut(index as usize) {
+            row[3] = if on { "on".to_string() } else { String::new() };
+        }
+    });
+    w.program_list.refresh_items(index as i64, index as i64);
+    w.status_bar.set_status_text(
+        &if on {
+            format!("Breakpoint set at 0x{addr:08x}")
+        } else {
+            format!("Breakpoint cleared at 0x{addr:08x}")
+        },
+        0,
+    );
+    cmd_tx.send(Cmd::SetBreakpoint { addr, on }).ok();
+}
+
 fn handle_sim_event(w: &Widgets, shared: &Shared, narrator: &Narrator, evt: Evt) {
     match evt {
         Evt::Output(text) => {
-            // Cap the transcript so a chatty program cannot grow it forever.
-            if w.io_output.get_value().len() > 1_000_000 {
+            // RARS clear-display (ASCII 12): truncate the transcript at the
+            // last form feed, then cap so a chatty program cannot grow it
+            // forever.
+            let text = match text.rfind('') {
+                Some(pos) => text[pos + 1..].to_string(),
+                None => text,
+            };
+            if w.io_output.get_value().len() + text.len() > 1_000_000 {
                 w.io_output.set_value("");
             }
             w.io_output.append_text(&text);
@@ -318,6 +448,7 @@ fn handle_sim_event(w: &Widgets, shared: &Shared, narrator: &Narrator, evt: Evt)
         Evt::State(snapshot) => {
             let bridge::StateSnapshot { regs, pc, instret } = *snapshot;
             refresh_registers(w, &regs);
+            mark_program_pc(w, pc);
             w.status_bar.set_status_text(&format!("pc 0x{pc:08x}, {instret} executed"), 1);
         }
         Evt::Stepped { text, line, changes, pc, instret } => {
@@ -334,6 +465,9 @@ fn handle_sim_event(w: &Widgets, shared: &Shared, narrator: &Narrator, evt: Evt)
             match &halt {
                 Halt::Breakpoint | Halt::Ebreak => {
                     w.status_bar.set_status_text(&format!("Stopped, {}", location.as_deref().unwrap_or("pc outside program")), 0);
+                }
+                Halt::Exit { code } => {
+                    w.status_bar.set_status_text(&format!("Program finished with code {code}"), 0);
                 }
                 _ => {}
             }
@@ -382,6 +516,11 @@ thread_local! {
             .map(|i| [format!("x{i}"), reg_name(i).to_string(), "0".to_string(), String::new()])
             .collect(),
     );
+    /// Backing rows for the Program tab: address, machine code, source text,
+    /// breakpoint marker, PC marker.
+    static PROGRAM_ROWS: RefCell<Vec<[String; 5]>> = const { RefCell::new(Vec::new()) };
+    /// Addresses parallel to PROGRAM_ROWS.
+    static PROGRAM_ADDRS: RefCell<Vec<u32>> = const { RefCell::new(Vec::new()) };
 }
 
 const ABI: &[&str] = &[
@@ -456,7 +595,7 @@ fn build_editor(parent: &Panel) -> StyledTextCtrl {
     editor
 }
 
-fn build_register_views(parent: &SplitterWindow) -> (Notebook, ListCtrl) {
+fn build_state_views(parent: &SplitterWindow) -> (Notebook, ListCtrl, ListCtrl) {
     let notebook = Notebook::builder(parent).build();
     notebook.set_accessibility_label("State views");
     #[cfg(target_os = "windows")]
@@ -465,6 +604,7 @@ fn build_register_views(parent: &SplitterWindow) -> (Notebook, ListCtrl) {
     // Registers: a virtual report list. wxGrid measured invisible to UIA
     // clients in the spike, so the list is the register surface.
     let list_panel = Panel::builder(&notebook).build();
+    list_panel.set_accessibility_label("Registers pane");
     let list = ListCtrl::builder(&list_panel)
         .with_style(ListCtrlStyle::Report | ListCtrlStyle::Virtual | ListCtrlStyle::SingleSel)
         .build();
@@ -490,7 +630,40 @@ fn build_register_views(parent: &SplitterWindow) -> (Notebook, ListCtrl) {
     list_panel.set_sizer(list_sizer, true);
     notebook.add_page(&list_panel, "Registers", true, None);
 
-    (notebook, list)
+    // Program tab: the assembled instructions with breakpoints. Virtual list;
+    // rows come from the PROGRAM_ROWS registry after each assemble.
+    let prog_panel = Panel::builder(&notebook).build();
+    prog_panel.set_accessibility_label("Program pane");
+    let prog_sizer = BoxSizer::builder(Orientation::Vertical).build();
+    let prog_list = ListCtrl::builder(&prog_panel)
+        .with_style(ListCtrlStyle::Report | ListCtrlStyle::Virtual | ListCtrlStyle::SingleSel)
+        .build();
+    prog_list.insert_column(0, "Address", ListColumnFormat::Left, 90);
+    prog_list.insert_column(1, "Machine", ListColumnFormat::Left, 100);
+    prog_list.insert_column(2, "Code", ListColumnFormat::Left, 260);
+    prog_list.insert_column(3, "Breakpoint", ListColumnFormat::Left, 90);
+    prog_list.insert_column(4, "Current", ListColumnFormat::Left, 70);
+    prog_list.set_item_count(0);
+    assert!(prog_list.set_virtual_text_callback(move |item, col| {
+        PROGRAM_ROWS.with(|rows| {
+            rows.borrow()
+                .get(item as usize)
+                .and_then(|row| row.get(col as usize))
+                .cloned()
+                .unwrap_or_default()
+        })
+    }));
+    prog_list.set_accessibility_label("Program instructions");
+    prog_list.set_accessibility_description(
+        "Assembled instructions; toggle a breakpoint with Enter or the Toggle Breakpoint action",
+    );
+    #[cfg(target_os = "windows")]
+    prog_list.set_accessibility_role(AccRole::List);
+    prog_sizer.add(&prog_list, 1, SizerFlag::Expand | SizerFlag::All, 2);
+    prog_panel.set_sizer(prog_sizer, true);
+    notebook.add_page(&prog_panel, "Program", false, None);
+
+    (notebook, list, prog_list)
 }
 
 /// The bottom notebook: Run I/O console plus the assembler messages list.
@@ -503,6 +676,7 @@ fn build_bottom_views(parent: &SplitterWindow) -> (Notebook, TextCtrl, TextCtrl,
 
     // Tab 1: Run I/O.
     let io_panel = Panel::builder(&notebook).build();
+    io_panel.set_accessibility_label("Run I O pane");
     let sizer = BoxSizer::builder(Orientation::Vertical).build();
 
     let io_label = StaticText::builder(&io_panel).with_label("Program output (read only)").build();
@@ -539,6 +713,7 @@ fn build_bottom_views(parent: &SplitterWindow) -> (Notebook, TextCtrl, TextCtrl,
 
     // Tab 2: Assembler messages.
     let msg_panel = Panel::builder(&notebook).build();
+    msg_panel.set_accessibility_label("Assembler messages pane");
     let msg_sizer = BoxSizer::builder(Orientation::Vertical).build();
     let messages = ListCtrl::builder(&msg_panel)
         .with_style(ListCtrlStyle::Report | ListCtrlStyle::SingleSel)
@@ -569,6 +744,8 @@ fn do_assemble(widgets: &Widgets, shared: &Shared, narrator: &Narrator, cmd_tx: 
     let result = rvasm::assemble(&files, &rvasm::AsmConfig::default());
 
     widgets.messages.delete_all_items();
+    *shared.diagnostic_spans.borrow_mut() =
+        result.diagnostics.iter().map(|d| d.pos).collect();
     for (i, d) in result.diagnostics.iter().enumerate() {
         let severity = if d.is_error() { "error" } else { "warning" };
         let idx = widgets.messages.insert_item(i as i64, severity, None);
@@ -593,6 +770,10 @@ fn do_assemble(widgets: &Widgets, shared: &Shared, narrator: &Narrator, cmd_tx: 
 
     if ok {
         if let Some(program) = result.program {
+            *shared.assembled.borrow_mut() = Some(program.clone());
+            load_program_rows(&program);
+            widgets.program_list.set_item_count(program.statements.len() as i64);
+            widgets.program_list.refresh_items(0, program.statements.len() as i64 - 1);
             widgets
                 .status_bar
                 .set_status_text(&format!("Assembled, {} instructions. Ready to run.", program.statements.len()), 0);
@@ -674,6 +855,7 @@ fn bind_menu_events(widgets: &Widgets, shared: &std::rc::Rc<Shared>, narrator: &
             ID_RUN_PAUSE => { tx.send(Cmd::Pause).ok(); }
             ID_RUN_STOP => { tx.send(Cmd::Pause).ok(); }
             ID_RUN_RESET => { tx.send(Cmd::Reset).ok(); }
+            ID_RUN_TOGGLE_BREAK => toggle_selected_breakpoint(&w, &tx),
             ID_SHORTCUTS => show_shortcuts_dialog(&fr),
             ID_ABOUT => w.status_bar.set_status_text("AsAccess: an accessibility-first RISC-V IDE", 0),
             _ => {}
@@ -745,7 +927,7 @@ fn show_shortcuts_dialog(frame: &Frame) {
     let panel = Panel::builder(&dialog).build();
     let sizer = BoxSizer::builder(Orientation::Vertical).build();
 
-    let shortcuts: [(&str, &str); 12] = [
+    let shortcuts: [(&str, &str); 13] = [
         ("Assemble", "F3"),
         ("Run program", "F5"),
         ("Pause run", "F9"),
@@ -753,6 +935,7 @@ fn show_shortcuts_dialog(frame: &Frame) {
         ("Backstep instruction", "F8"),
         ("Stop program", "F11"),
         ("Reset program", "F12"),
+        ("Toggle breakpoint", "Ctrl+D"),
         ("New file", "Ctrl+N"),
         ("Open file", "Ctrl+O"),
         ("Save file", "Ctrl+S"),

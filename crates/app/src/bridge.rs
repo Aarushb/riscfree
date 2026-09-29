@@ -22,6 +22,8 @@ pub enum Cmd {
     Step,
     Backstep,
     Reset,
+    /// Toggle a breakpoint on a text-segment address.
+    SetBreakpoint { addr: u32, on: bool },
 }
 
 pub enum Evt {
@@ -157,6 +159,11 @@ pub fn start_sim_thread(cmds: Receiver<Cmd>, events: Sender<Evt>, input: InputCh
                         m.reset();
                         running = false;
                         send_state(&events, m);
+                    }
+                }
+                Cmd::SetBreakpoint { addr, on } => {
+                    if let Some(m) = machine.as_mut() {
+                        m.set_breakpoint(addr, on);
                     }
                 }
             }

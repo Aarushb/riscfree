@@ -64,6 +64,9 @@ def collect_statuses(iuia, hwnd: int, out: list) -> None:
             or "Assembly failed" in name
             or name.startswith("pc 0x")
             or name.startswith("line ")
+            or "Stopped" in name
+            or "Breakpoint" in name
+            or "Program finished" in name
             or name == "Run I O output"
         ):
             out.append((name, value, classname))
@@ -121,6 +124,27 @@ def main() -> int:
 
         joined = " | ".join(f"{n} {v}" for n, v, _ in found)
         ok = "executed" in joined and "12" in joined
+
+        # Breakpoint flow: reset (F12), Ctrl+D toggles on the row at the
+        # current PC (row 0 after reset), F5 stops there immediately.
+        time.sleep(0.3)
+        post_key(hwnd, 0x7B)  # F12: reset
+        step("sent F12 (reset)")
+        time.sleep(1.0)
+        # Toggle Breakpoint via WM_COMMAND (the menu handler). Posted synthetic
+        # Ctrl chords do not update the key state menu accelerators check.
+        win32gui.PostMessage(hwnd, win32con.WM_COMMAND, 2009, 0)
+        step("sent WM_COMMAND Toggle Breakpoint")
+        time.sleep(0.5)
+        post_key(hwnd, 0x74)  # F5: run to breakpoint
+        step("sent F5 (run to breakpoint)")
+        time.sleep(2.0)
+
+        found2: list = []
+        collect_statuses(iuia, hwnd, found2)
+        joined2 = " | ".join(f"{n} {v}" for n, v, _ in found2)
+        step(f"breakpoint walk: {joined2[:200]}")
+        ok = ok and "Stopped" in joined2
         step("PASS" if ok else "FAIL")
         for line in steps:
             print(line)
