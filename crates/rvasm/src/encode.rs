@@ -204,6 +204,10 @@ pub static INSTRUCTIONS: &[InstructionInfo] = &[
     InstructionInfo::new("fence", Format::I, MISC_MEM, 0, 0),
     InstructionInfo::new("ecall", Format::I, SYSTEM, 0, 0),
     InstructionInfo::new("ebreak", Format::I, SYSTEM, 0, 0),
+    // Trap returns and waits live in the same zero-register SYSTEM slot and
+    // are told apart by the immediate field.
+    InstructionInfo::new("uret", Format::I, SYSTEM, 0, 0),
+    InstructionInfo::new("wfi", Format::I, SYSTEM, 0, 0),
     InstructionInfo::new("csrrw", Format::Csr, SYSTEM, 1, 0),
     InstructionInfo::new("csrrs", Format::Csr, SYSTEM, 2, 0),
     InstructionInfo::new("csrrc", Format::Csr, SYSTEM, 3, 0),
@@ -429,7 +433,12 @@ pub fn encode(info: &InstructionInfo, ops: &[u32]) -> u32 {
         // fence's canonical RARS encoding sets the IORW bits.
         Format::I if info.name == "fence" => enc_i(info, 0, 0, 0xff),
         Format::I if ops.is_empty() => {
-            let imm = u32::from(info.name == "ebreak");
+            let imm = match info.name {
+                "ebreak" => 1,
+                "uret" => 0x002,
+                "wfi" => 0x105,
+                _ => 0,
+            };
             enc_i(info, 0, 0, imm)
         }
         Format::I => enc_i(info, ops[0], ops[1], ops[2]),

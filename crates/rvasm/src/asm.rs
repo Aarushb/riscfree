@@ -758,6 +758,24 @@ impl Assembler {
         self.expand_pseudo(mnemonic, ops, pos);
     }
 
+    /// Push one CSR-format instruction (helper for the CSR pseudo-ops).
+    fn push_csr_basic(
+        &mut self,
+        name: &'static str,
+        rd: Operand,
+        csr: Operand,
+        rs: Option<Operand>,
+        from: SourcePos,
+        pos: SourcePos,
+    ) {
+        let mut ops = vec![rd, csr];
+        if let Some(rs) = rs {
+            ops.push(rs);
+        }
+        self.raw.push(RawInstr { name, ops, addr: self.text_addr, source: pos, expanded_from: Some(from) });
+        self.advance(4);
+    }
+
     fn push_basic(&mut self, name: &'static str, ops: Vec<Operand>, from: SourcePos, pos: SourcePos) {
         self.raw.push(RawInstr { name, ops, addr: self.text_addr, source: pos, expanded_from: Some(from) });
         self.advance(4);
@@ -917,6 +935,36 @@ impl Assembler {
                 self.push_basic("jalr", vec![r(1), r(rs), imm(0)], pos, pos);
             }
             ("ret", []) => self.push_basic("jalr", vec![r(0), r(1), imm(0)], pos, pos),
+            // CSR pseudo-ops. Read form keeps rd first; the write/set/clear
+            // forms take the CSR first and route through x0 like RARS.
+            ("csrr", [Operand::Reg(rd), csr @ (Operand::Sym(_) | Operand::Reg(_) | Operand::Imm(_))]) => {
+                let (rd, csr) = (*rd, csr.clone());
+                self.push_csr_basic("csrrs", r(rd), csr, Some(r(0)), pos, pos);
+            }
+            ("csrw", [csr @ (Operand::Sym(_) | Operand::Reg(_) | Operand::Imm(_)), Operand::Reg(rs)]) => {
+                let (csr, rs) = (csr.clone(), *rs);
+                self.push_csr_basic("csrrw", r(0), csr, Some(r(rs)), pos, pos);
+            }
+            ("csrs", [csr @ (Operand::Sym(_) | Operand::Reg(_) | Operand::Imm(_)), Operand::Reg(rs)]) => {
+                let (csr, rs) = (csr.clone(), *rs);
+                self.push_csr_basic("csrrs", r(0), csr, Some(r(rs)), pos, pos);
+            }
+            ("csrc", [csr @ (Operand::Sym(_) | Operand::Reg(_) | Operand::Imm(_)), Operand::Reg(rs)]) => {
+                let (csr, rs) = (csr.clone(), *rs);
+                self.push_csr_basic("csrrc", r(0), csr, Some(r(rs)), pos, pos);
+            }
+            ("csrwi", [csr @ (Operand::Sym(_) | Operand::Reg(_) | Operand::Imm(_)), Operand::Imm(v)]) => {
+                let (csr, v) = (csr.clone(), *v);
+                self.push_csr_basic("csrrwi", r(0), csr, Some(imm(v)), pos, pos);
+            }
+            ("csrsi", [csr @ (Operand::Sym(_) | Operand::Reg(_) | Operand::Imm(_)), Operand::Imm(v)]) => {
+                let (csr, v) = (csr.clone(), *v);
+                self.push_csr_basic("csrrsi", r(0), csr, Some(imm(v)), pos, pos);
+            }
+            ("csrci", [csr @ (Operand::Sym(_) | Operand::Reg(_) | Operand::Imm(_)), Operand::Imm(v)]) => {
+                let (csr, v) = (csr.clone(), *v);
+                self.push_csr_basic("csrrci", r(0), csr, Some(imm(v)), pos, pos);
+            }
             ("call", [Operand::Sym(l)]) => {
                 let l = l.clone();
                 let auipc_addr = self.text_addr;
@@ -1561,6 +1609,34 @@ mod tests {
         assert!(!r.has_errors());
         let p = r.program.unwrap();
         assert_eq!(p.statements[0].encoding, p.statements[1].encoding);
+    }
+
+    #[test]
+    fn csr_pseudo_ops_expand() {
+        let r = asm(".text
+csrr a0, uscratch
+csrw uscratch, t0
+csrs utvec, t1
+csrc uip, a2
+csrrwi x0, uscratch, 5
+");
+        assert!(!r.has_errors(), "diags: {:?}", r.diagnostics);
+        let p = r.program.unwrap();
+        // csrr -> csrrs a0, uscratch, x0; csrw -> csrrw x0, uscratch, t0.
+        assert_eq!(p.statements[0].basic_text.as_ref(), "csrrs a0, 0x040, zero");
+        assert_eq!(p.statements[1].basic_text.as_ref(), "csrrw zero, 0x040, t0");
+        assert_eq!(p.statements[4].basic_text.as_ref(), "csrrwi zero, 0x040, 5");
+    }
+
+    #[test]
+    fn uret_and_wfi_encode() {
+        let r = asm("uret
+wfi
+");
+        assert!(!r.has_errors(), "diags: {:?}", r.diagnostics);
+        let p = r.program.unwrap();
+        assert_eq!(p.statements[0].encoding, 0x0020_0073); // uret
+        assert_eq!(p.statements[1].encoding, 0x1050_0073); // wfi
     }
 
     #[test]

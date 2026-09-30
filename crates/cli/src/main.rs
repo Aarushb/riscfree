@@ -13,6 +13,7 @@ fn main() -> ExitCode {
     let mut dump_regs = false;
     let mut rv64 = false;
     let mut trace_path: Option<String> = None;
+    let mut timer_interval: Option<u64> = None;
     let mut prog_args: Vec<String> = Vec::new();
 
     let mut i = 0usize;
@@ -37,6 +38,14 @@ fn main() -> ExitCode {
                 trace_path = args.get(i).cloned();
                 if trace_path.is_none() {
                     eprintln!("--trace-json needs a file path");
+                    return ExitCode::from(1);
+                }
+            }
+            "--timer" => {
+                i += 1;
+                timer_interval = args.get(i).and_then(|v| v.parse().ok());
+                if timer_interval.is_none() {
+                    eprintln!("--timer needs an instruction count");
                     return ExitCode::from(1);
                 }
             }
@@ -90,6 +99,9 @@ fn main() -> ExitCode {
     );
     if !prog_args.is_empty() {
         machine.set_program_args(&prog_args);
+    }
+    if let Some(interval) = timer_interval {
+        machine.set_timer(interval);
     }
     if let Some(trace_path) = &trace_path {
         // Per-instruction JSON lines for autograders, written to a file so
@@ -209,6 +221,7 @@ fn print_help() {
            --max-steps N stop after N instructions\n\
            --dump-regs   print non-zero registers after the run
            --rv64        assemble and execute as RV64
+           --timer N     raise timer interrupts (cause 16) every N instructions
            --trace-json <file>
                          write one JSON object per executed instruction to <file>\n\
          the program's console output goes to stdout; input comes from stdin."
