@@ -162,8 +162,8 @@ pub fn expand_compressed(word: u16, rv64: bool) -> Option<u32> {
                     Some(0x1b | ((imm as u32 & 0xfff) << 20) | (rd << 15) | (rd << 7))
                 }
                 0x1 => {
-                    // c.jal (RV32)
-                    Some(jal(1, cj_offset(word)))
+                    // c.jal (RV32); the 12-bit offset is signed.
+                    Some(jal(1, sext_n(cj_offset(word), 12) as u32))
                 }
                 0x2 => {
                     // c.li
@@ -258,10 +258,11 @@ pub fn expand_compressed(word: u16, rv64: bool) -> Option<u32> {
                         }
                     }
                 }
-                0x5 => Some(jal(0, cj_offset(word))),
+                0x5 => Some(jal(0, sext_n(cj_offset(word), 12) as u32)),
                 0x6 | 0x7 => {
                     let rs1 = bits(word, 9, 7) + 8;
-                    let offset = cb_offset(word);
+                    // The 9-bit branch offset is signed.
+                    let offset = sext_n(cb_offset(word), 9) as u32;
                     let funct3 = if bits(word, 15, 13) == 0x6 { 0x0 } else { 0x1 };
                     Some(branch(rs1, offset, funct3))
                 }
