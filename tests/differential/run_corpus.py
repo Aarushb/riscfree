@@ -20,13 +20,19 @@ CLI = REPO / "target" / "debug" / "asaccess-cli.exe"
 CORPUS = Path(__file__).parent / "programs"
 
 
+def stdin_for(program: Path) -> str:
+    # Optional <name>.input feeds programs that read console input.
+    input_file = program.with_suffix(".input")
+    return input_file.read_text() if input_file.exists() else ""
+
+
 def run_cli(program: Path) -> tuple[str, int]:
     result = subprocess.run(
-        [str(CLI), "--run", "--dump-regs", str(program)],
+        [str(CLI), "--run", str(program)],
         capture_output=True,
         text=True,
         timeout=60,
-        input="",
+        input=stdin_for(program),
     )
     return result.stdout, result.returncode
 
@@ -40,7 +46,7 @@ def run_rars(jar: Path, program: Path) -> tuple[str, int]:
         capture_output=True,
         text=True,
         timeout=60,
-        input="",
+        input=stdin_for(program),
     )
     return result.stdout, result.returncode
 
