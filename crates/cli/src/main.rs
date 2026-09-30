@@ -12,6 +12,7 @@ fn main() -> ExitCode {
     let mut max_steps: Option<u64> = None;
     let mut dump_regs = false;
     let mut rv64 = false;
+    let mut compressed = false;
     let mut trace_path: Option<String> = None;
     let mut timer_interval: Option<u64> = None;
     let mut prog_args: Vec<String> = Vec::new();
@@ -33,6 +34,7 @@ fn main() -> ExitCode {
                 }
             }
             "--rv64" => rv64 = true,
+            "--compressed" => compressed = true,
             "--trace-json" => {
                 i += 1;
                 trace_path = args.get(i).cloned();
@@ -70,12 +72,24 @@ fn main() -> ExitCode {
         return ExitCode::from(1);
     }
 
-    let result = rvasm::assemble(&files, &AsmConfig { rv64, ..AsmConfig::default() });
+    let result = rvasm::assemble(
+        &files,
+        &AsmConfig {
+            rv64,
+            allow_compressed: compressed,
+            ..AsmConfig::default()
+        },
+    );
     for d in &result.diagnostics {
         let file = files[d.pos.file].name.as_str();
         let code = d.code;
         let sev = if d.is_error() { "error" } else { "warning" };
-        eprintln!("{sev} [{code}] {file}:{}:{}: {}", d.pos.line, d.pos.col + 1, d.message);
+        eprintln!(
+            "{sev} [{code}] {file}:{}:{}: {}",
+            d.pos.line,
+            d.pos.col + 1,
+            d.message
+        );
     }
     if result.has_errors() || result.program.is_none() {
         return ExitCode::from(2);
@@ -95,7 +109,10 @@ fn main() -> ExitCode {
     let mut machine = Machine::new(
         program,
         Box::new(StdHost::default()),
-        MachineConfig { rv64, ..MachineConfig::default() },
+        MachineConfig {
+            rv64,
+            ..MachineConfig::default()
+        },
     );
     if !prog_args.is_empty() {
         machine.set_program_args(&prog_args);
@@ -137,7 +154,9 @@ fn main() -> ExitCode {
                 .changes
                 .iter()
                 .filter_map(|c| match c {
-                    rvm::Change::Mem { addr, new, width, .. } => Some((*addr, *new, *width)),
+                    rvm::Change::Mem {
+                        addr, new, width, ..
+                    } => Some((*addr, *new, *width)),
                     _ => None,
                 })
                 .collect();
@@ -183,7 +202,7 @@ fn main() -> ExitCode {
         for idx in 0..32 {
             let v = machine.reg(idx);
             if v != 0 {
-                println!("x{:<2} = 0x{v:016x} ({})", v, v as u32 as i32);
+                println!("x{idx:<2} = 0x{v:016x} ({})", v as u32 as i32);
             }
         }
         println!("pc   = 0x{:08x}", machine.pc());
@@ -198,14 +217,17 @@ fn main() -> ExitCode {
 fn print_halt(halt: &Halt, machine: &Machine) {
     match halt {
         Halt::Exit { code: _ } => {}
-        Halt::DroppedOff => eprintln!("simulation: program dropped off the bottom of the text segment"),
+        Halt::DroppedOff => {
+            eprintln!("simulation: program dropped off the bottom of the text segment")
+        }
         Halt::Breakpoint => eprintln!("simulation: stopped at breakpoint (0x{:08x})", machine.pc()),
         Halt::Ebreak => eprintln!("simulation: ebreak (0x{:08x})", machine.pc()),
         Halt::Error { message } => {
             eprintln!("simulation error: {message}");
             std::process::exit(3);
         }
-        Halt::Watchpoint { description } | Halt::Memcheck { description }
+        Halt::Watchpoint { description }
+        | Halt::Memcheck { description }
         | Halt::CallingConvention { description } => {
             eprintln!("simulation: {description}");
         }
@@ -221,6 +243,7 @@ fn print_help() {
            --max-steps N stop after N instructions\n\
            --dump-regs   print non-zero registers after the run
            --rv64        assemble and execute as RV64
+           --compressed  accept C (compressed) 16-bit instructions
            --timer N     raise timer interrupts (cause 16) every N instructions
            --trace-json <file>
                          write one JSON object per executed instruction to <file>\n\

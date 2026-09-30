@@ -6,9 +6,11 @@
 //! the offending source and read the message aloud.
 
 mod asm;
+pub mod compressed;
 mod encode;
 mod lexer;
 
+pub use compressed::COp;
 pub use encode::{decode_fields, opcode_representative, DecodedFields, InstructionInfo};
 
 use std::collections::BTreeMap;
@@ -40,7 +42,12 @@ pub struct Diagnostic {
 
 impl Diagnostic {
     fn error(code: &'static str, message: impl Into<String>, pos: SourcePos) -> Self {
-        Diagnostic { severity: Severity::Error, code, message: message.into(), pos }
+        Diagnostic {
+            severity: Severity::Error,
+            code,
+            message: message.into(),
+            pos,
+        }
     }
 
     pub fn is_error(&self) -> bool {
@@ -59,6 +66,10 @@ pub struct Statement {
     pub source: SourcePos,
     /// Rendered basic-instruction text, e.g. `addi a0, zero, 55`.
     pub basic_text: Arc<str>,
+    /// Bytes in this instruction: 4, or 2 when the compressed set is enabled.
+    pub size: u32,
+    /// The 16-bit halfword for compressed instructions.
+    pub encoding16: Option<u16>,
 }
 
 /// Assembled static data, contiguous from `base`.
@@ -119,8 +130,9 @@ impl SymbolTable {
 pub struct Program {
     /// First text address (RARS default layout: 0x00400000).
     pub text_base: u32,
-    /// Text statements in address order; statement `i` sits at
-    /// `text_base + 4 * i`.
+    /// Text statements in address order; each statement sits at its own
+    /// `addr` (4-byte instructions predominate; the compressed set adds
+    /// 2-byte instructions).
     pub statements: Vec<Statement>,
     pub data: DataImage,
     pub symbols: SymbolTable,
@@ -129,6 +141,11 @@ pub struct Program {
     /// emitted for it beyond this zero fill, which rvm writes at load so the
     /// reserved region exists in the image like RARS's extern segment.
     pub extern_chunks: Vec<(u32, Vec<u8>)>,
+    /// Per-statement text addresses, in statement order (binary-search
+    /// support for `statement_at` with variable instruction sizes).
+    pub addrs: Vec<u32>,
+    /// First address past the last statement.
+    pub text_end: u32,
     /// Original source lines, indexed by `FileId` then line (0-based).
     pub sources: Vec<Arc<str>>,
     pub file_names: Vec<String>,
@@ -136,14 +153,14 @@ pub struct Program {
 
 impl Program {
     pub fn statement_at(&self, addr: u32) -> Option<&Statement> {
-        if addr < self.text_base || !(addr - self.text_base).is_multiple_of(4) {
-            return None;
-        }
-        self.statements.get(((addr - self.text_base) / 4) as usize)
+        self.addrs
+            .binary_search(&addr)
+            .ok()
+            .and_then(|i| self.statements.get(i))
     }
 
     pub fn text_end(&self) -> u32 {
-        self.text_base + 4 * self.statements.len() as u32
+        self.text_end
     }
 }
 
@@ -164,6 +181,9 @@ pub struct AsmConfig {
     /// pseudo-op semantics match `PseudoOps-64.txt`. Register/memory layout
     /// is unchanged.
     pub rv64: bool,
+    /// Accept the C (compressed) 16-bit instruction set. Off by default,
+    /// matching RARS which has no compressed support at all.
+    pub allow_compressed: bool,
 }
 
 impl Default for AsmConfig {
@@ -174,6 +194,7 @@ impl Default for AsmConfig {
             extern_base: 0x1000_0000,
             allow_pseudo: true,
             rv64: false,
+            allow_compressed: false,
         }
     }
 }

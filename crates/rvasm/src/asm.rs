@@ -2,7 +2,10 @@
 
 use crate::encode::{self, Format, InstructionInfo, OpKind, Range};
 use crate::lexer::{lex_line, Tok, Token};
-use crate::{AsmConfig, AsmResult, DataImage, Diagnostic, InputFile, Program, SourcePos, Statement, Symbol, SymbolTable};
+use crate::{
+    AsmConfig, AsmResult, DataImage, Diagnostic, InputFile, Program, SourcePos, Statement, Symbol,
+    SymbolTable,
+};
 use std::collections::{BTreeMap, HashSet};
 use std::iter::Peekable;
 use std::sync::Arc;
@@ -12,7 +15,7 @@ use std::sync::Arc;
 const MACRO_DEPTH_LIMIT: u32 = 32;
 
 #[derive(Debug, Clone)]
-enum Operand {
+pub(crate) enum Operand {
     Reg(u8),
     /// Floating-point register (flw/fsw/F ops); keeps FP names rendering
     /// correctly and lets encode_one reject mixed register classes.
@@ -29,10 +32,16 @@ enum Operand {
     HiPcRel(String),
     LoPcRel(String, u32),
     /// `offset(base)` for loads and stores.
-    Mem { off: i64, base: u8 },
+    Mem {
+        off: i64,
+        base: u8,
+    },
     /// Label-form load/store relocated through `at`: the `lw rd, sym` RARS
     /// pseudo-form. Encodes as `%lo(sym)(base)`.
-    MemLo { sym: String, base: u8 },
+    MemLo {
+        sym: String,
+        base: u8,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -42,6 +51,8 @@ struct RawInstr {
     addr: u32,
     source: SourcePos,
     expanded_from: Option<SourcePos>,
+    /// 4 for regular instructions, 2 for compressed ones.
+    size: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -114,7 +125,10 @@ pub fn assemble_impl(files: &[InputFile], cfg: &AsmConfig) -> AsmResult {
         a.pass_one(f, file_id);
     }
     let program = a.pass_two();
-    AsmResult { program: Some(program), diagnostics: a.diags }
+    AsmResult {
+        program: Some(program),
+        diagnostics: a.diags,
+    }
 }
 
 impl Assembler {
@@ -150,7 +164,11 @@ impl Assembler {
         // `.end_macro` before normal per-line parsing resumes.
         let mut lines = file.source.lines().enumerate().peekable();
         while let Some((line_idx, line)) = lines.next() {
-            let pos = SourcePos { file: file_id, line: line_idx as u32 + 1, col: 0 };
+            let pos = SourcePos {
+                file: file_id,
+                line: line_idx as u32 + 1,
+                col: 0,
+            };
             let toks = lex_line(line, pos, &mut self.diags);
             if matches!(toks.first().map(|t| &t.tok), Some(Tok::Ident(d)) if d == ".macro") {
                 self.collect_macro(&mut lines, toks);
@@ -184,7 +202,11 @@ impl Assembler {
                 self.err("E-DIRECTIVE", "'.macro' is missing its .end_macro", pos);
                 return;
             };
-            let lpos = SourcePos { file: pos.file, line: line_idx as u32 + 1, col: 0 };
+            let lpos = SourcePos {
+                file: pos.file,
+                line: line_idx as u32 + 1,
+                col: 0,
+            };
             let toks = lex_line(line, lpos, &mut self.diags);
             match toks.first().map(|t| &t.tok) {
                 Some(Tok::Ident(d)) if d == ".macro" => {
@@ -214,7 +236,11 @@ impl Assembler {
     /// Parse what follows `.macro` on the header line: a name and a
     /// comma-separated parameter list, inside optional parentheses.
     fn macro_header(&mut self, rest: &[Token], pos: SourcePos) -> Option<(String, Vec<String>)> {
-        let Some(Token { tok: Tok::Ident(name), .. }) = rest.first() else {
+        let Some(Token {
+            tok: Tok::Ident(name),
+            ..
+        }) = rest.first()
+        else {
             self.err("E-DIRECTIVE", ".macro needs a name", pos);
             return None;
         };
@@ -235,7 +261,11 @@ impl Assembler {
                                 break;
                             }
                             _ => {
-                                self.err("E-DIRECTIVE", "expected ',' or ')' in the .macro parameter list", pos);
+                                self.err(
+                                    "E-DIRECTIVE",
+                                    "expected ',' or ')' in the .macro parameter list",
+                                    pos,
+                                );
                                 return None;
                             }
                         }
@@ -264,7 +294,11 @@ impl Assembler {
             }
         }
         if j < rest.len() {
-            self.err("E-DIRECTIVE", "unexpected tokens after the .macro parameter list", pos);
+            self.err(
+                "E-DIRECTIVE",
+                "unexpected tokens after the .macro parameter list",
+                pos,
+            );
             return None;
         }
         Some((name, params))
@@ -279,13 +313,19 @@ impl Assembler {
             match t.tok {
                 Tok::LParen => {
                     depth += 1;
-                    args.last_mut().expect("always at least one arg").push(t.clone());
+                    args.last_mut()
+                        .expect("always at least one arg")
+                        .push(t.clone());
                 }
                 Tok::RParen => {
                     depth -= 1;
                     if depth == 0 {
                         if k + 1 != toks.len() {
-                            self.err("E-SYNTAX", "unexpected tokens after the macro call", toks[k + 1].pos);
+                            self.err(
+                                "E-SYNTAX",
+                                "unexpected tokens after the macro call",
+                                toks[k + 1].pos,
+                            );
                         }
                         // `name()` is a zero-argument call, not one empty one.
                         if args.len() == 1 && args[0].is_empty() {
@@ -293,13 +333,22 @@ impl Assembler {
                         }
                         return args;
                     }
-                    args.last_mut().expect("always at least one arg").push(t.clone());
+                    args.last_mut()
+                        .expect("always at least one arg")
+                        .push(t.clone());
                 }
                 Tok::Comma if depth == 1 => args.push(Vec::new()),
-                _ => args.last_mut().expect("always at least one arg").push(t.clone()),
+                _ => args
+                    .last_mut()
+                    .expect("always at least one arg")
+                    .push(t.clone()),
             }
         }
-        self.err("E-SYNTAX", format!("macro call '{name}' is missing ')'"), pos);
+        self.err(
+            "E-SYNTAX",
+            format!("macro call '{name}' is missing ')'"),
+            pos,
+        );
         args
     }
 
@@ -317,11 +366,17 @@ impl Assembler {
             self.macro_abort = true;
             return;
         }
-        let Some(def) = self.macros.get(name).cloned() else { return };
+        let Some(def) = self.macros.get(name).cloned() else {
+            return;
+        };
         if args.len() != def.params.len() {
             self.err(
                 "E-OPERAND",
-                format!("macro '{name}' expects {} parameter(s), found {}", def.params.len(), args.len()),
+                format!(
+                    "macro '{name}' expects {} parameter(s), found {}",
+                    def.params.len(),
+                    args.len()
+                ),
                 pos,
             );
             return;
@@ -368,14 +423,21 @@ impl Assembler {
     fn parse_line(&mut self, toks: Vec<Token>) {
         let mut i = 0usize;
         // Labels.
-        while i + 1 < toks.len() && matches!(&toks[i].tok, Tok::Ident(_)) && toks[i + 1].tok == Tok::Colon {
+        while i + 1 < toks.len()
+            && matches!(&toks[i].tok, Tok::Ident(_))
+            && toks[i + 1].tok == Tok::Colon
+        {
             if let Tok::Ident(name) = &toks[i].tok {
                 let name = name.clone();
                 let addr = self.cur_addr();
                 let global = self.globals.contains(&name);
                 self.symbols.define(
                     name.clone(),
-                    Symbol { addr, global, source: toks[i].pos },
+                    Symbol {
+                        addr,
+                        global,
+                        source: toks[i].pos,
+                    },
                     &mut self.diags,
                 );
             }
@@ -426,7 +488,13 @@ impl Assembler {
         match &t.tok {
             Tok::Int(v) => {
                 if let Some(off_base) = self.try_mem(toks, i) {
-                    return (Operand::Mem { off: *v, base: off_base }, i + 4);
+                    return (
+                        Operand::Mem {
+                            off: *v,
+                            base: off_base,
+                        },
+                        i + 4,
+                    );
                 }
                 (Operand::Imm(*v), i + 1)
             }
@@ -447,11 +515,19 @@ impl Assembler {
                 }
             }
             Tok::Float(_) => {
-                self.err("E-OPERAND", "a floating-point literal is only valid in .float/.double", t.pos);
+                self.err(
+                    "E-OPERAND",
+                    "a floating-point literal is only valid in .float/.double",
+                    t.pos,
+                );
                 (Operand::Imm(0), i + 1)
             }
             _ => {
-                self.err("E-OPERAND", "expected a register, immediate, label, or offset(base)", t.pos);
+                self.err(
+                    "E-OPERAND",
+                    "expected a register, immediate, label, or offset(base)",
+                    t.pos,
+                );
                 (Operand::Imm(0), i + 1)
             }
         }
@@ -483,7 +559,11 @@ impl Assembler {
             return None;
         }
         let Tok::Ident(base_name) = &base_tok.tok else {
-            self.err("E-OPERAND", "expected a base register inside offset(base)", base_tok.pos);
+            self.err(
+                "E-OPERAND",
+                "expected a base register inside offset(base)",
+                base_tok.pos,
+            );
             return None;
         };
         match reg_by_name(base_name) {
@@ -502,8 +582,16 @@ impl Assembler {
     fn directive(&mut self, d: &str, rest: &[Token], pos: SourcePos) {
         match d {
             ".text" | ".data" => {
-                self.segment = if d == ".text" { Segment::Text } else { Segment::Data };
-                if let Some(Token { tok: Tok::Int(addr), .. }) = rest.first() {
+                self.segment = if d == ".text" {
+                    Segment::Text
+                } else {
+                    Segment::Data
+                };
+                if let Some(Token {
+                    tok: Tok::Int(addr),
+                    ..
+                }) = rest.first()
+                {
                     match self.segment {
                         Segment::Text => self.text_addr = *addr as u32,
                         Segment::Data => self.data_addr = *addr as u32,
@@ -511,7 +599,10 @@ impl Assembler {
                 }
             }
             ".align" => {
-                let Some(Token { tok: Tok::Int(n), .. }) = rest.first() else {
+                let Some(Token {
+                    tok: Tok::Int(n), ..
+                }) = rest.first()
+                else {
                     self.err("E-DIRECTIVE", ".align needs an alignment value", pos);
                     return;
                 };
@@ -529,7 +620,10 @@ impl Assembler {
                 }
             }
             ".space" => {
-                let Some(Token { tok: Tok::Int(n), .. }) = rest.first() else {
+                let Some(Token {
+                    tok: Tok::Int(n), ..
+                }) = rest.first()
+                else {
                     self.err("E-DIRECTIVE", ".space needs a byte count", pos);
                     return;
                 };
@@ -564,7 +658,11 @@ impl Assembler {
                             self.advance(width as u32);
                         }
                         Tok::Comma => {}
-                        _ => self.err("E-DIRECTIVE", format!("{d} expects integers or labels"), rest[j].pos),
+                        _ => self.err(
+                            "E-DIRECTIVE",
+                            format!("{d} expects integers or labels"),
+                            rest[j].pos,
+                        ),
                     }
                     j += 1;
                 }
@@ -589,7 +687,9 @@ impl Assembler {
                     self.err("E-DIRECTIVE", ".eqv needs a name", pos);
                     return;
                 }
-                let Tok::Ident(name) = &rest[0].tok else { unreachable!() };
+                let Tok::Ident(name) = &rest[0].tok else {
+                    unreachable!()
+                };
                 let expansion: Vec<Tok> = rest[1..].iter().map(|t| t.tok.clone()).collect();
                 self.equates.insert(name.clone(), expansion);
             }
@@ -622,13 +722,21 @@ impl Assembler {
                             "inf" => Some(f64::INFINITY),
                             "nan" => Some(f64::NAN),
                             other => {
-                                self.err("E-DIRECTIVE", format!("unknown float value '{other}'"), rest[j].pos);
+                                self.err(
+                                    "E-DIRECTIVE",
+                                    format!("unknown float value '{other}'"),
+                                    rest[j].pos,
+                                );
                                 None
                             }
                         },
                         Tok::Comma => None,
                         _ => {
-                            self.err("E-DIRECTIVE", format!("{d} expects floating-point values"), rest[j].pos);
+                            self.err(
+                                "E-DIRECTIVE",
+                                format!("{d} expects floating-point values"),
+                                rest[j].pos,
+                            );
                             None
                         }
                     };
@@ -646,7 +754,11 @@ impl Assembler {
             }
             // Definitions are consumed directly by pass_one; seeing either
             // directive here means it was misplaced.
-            ".macro" => self.err("E-DIRECTIVE", "'.macro' must be the first token on its line", pos),
+            ".macro" => self.err(
+                "E-DIRECTIVE",
+                "'.macro' must be the first token on its line",
+                pos,
+            ),
             ".end_macro" => self.err("E-DIRECTIVE", "'.end_macro' without a matching .macro", pos),
             ".include" => self.err("E-UNSUPPORTED", ".include lands in phase 1", pos),
             // `.extern name size` reserves `size` bytes at the head of the
@@ -654,12 +766,20 @@ impl Assembler {
             // The cursor is independent of the segment selectors, so the
             // directive is legal in .text and .data alike.
             ".extern" => {
-                let Some(Token { tok: Tok::Ident(name), .. }) = rest.first() else {
+                let Some(Token {
+                    tok: Tok::Ident(name),
+                    ..
+                }) = rest.first()
+                else {
                     self.err("E-DIRECTIVE", ".extern needs a name", pos);
                     return;
                 };
                 let name = name.clone();
-                let Some(Token { tok: Tok::Int(size), .. }) = rest.get(1) else {
+                let Some(Token {
+                    tok: Tok::Int(size),
+                    ..
+                }) = rest.get(1)
+                else {
                     self.err("E-DIRECTIVE", ".extern needs a byte count", pos);
                     return;
                 };
@@ -672,11 +792,19 @@ impl Assembler {
                     return;
                 }
                 if let Some(extra) = rest.get(2) {
-                    self.err("E-DIRECTIVE", "unexpected tokens after the .extern size", extra.pos);
+                    self.err(
+                        "E-DIRECTIVE",
+                        "unexpected tokens after the .extern size",
+                        extra.pos,
+                    );
                     return;
                 }
                 let Some(addr) = self.extern_next.checked_add(*size as u32) else {
-                    self.err("E-DIRECTIVE", ".extern reservation overflows the address space", pos);
+                    self.err(
+                        "E-DIRECTIVE",
+                        ".extern reservation overflows the address space",
+                        pos,
+                    );
                     return;
                 };
                 // A duplicate reports E-DUP-SYM from `define` and allocates
@@ -685,11 +813,16 @@ impl Assembler {
                 // RARS declares extern symbols global.
                 self.symbols.define(
                     name,
-                    Symbol { addr: self.extern_next, global: true, source: pos },
+                    Symbol {
+                        addr: self.extern_next,
+                        global: true,
+                        source: pos,
+                    },
                     &mut self.diags,
                 );
                 if is_new {
-                    self.extern_chunks.push((self.extern_next, vec![0; *size as u32 as usize]));
+                    self.extern_chunks
+                        .push((self.extern_next, vec![0; *size as u32 as usize]));
                     self.extern_next = addr;
                 }
             }
@@ -706,6 +839,21 @@ impl Assembler {
         if self.segment != Segment::Text {
             self.err("E-SEGMENT", "instructions must appear inside .text", pos);
         }
+        // Compressed instructions: 2-byte encodings on their own path.
+        if self.cfg.allow_compressed && mnemonic.starts_with("c.") {
+            let name = crate::compressed::lookup_name(mnemonic);
+            self.push_compressed(name, ops, pos);
+            return;
+        }
+        if mnemonic.starts_with("c.") {
+            self.err(
+                "E-XLEN",
+                format!("compressed instruction '{mnemonic}' requires enabling the C extension (allow_compressed)"),
+                pos,
+            );
+            self.advance(4);
+            return;
+        }
         if let Some(info) = encode::lookup(mnemonic) {
             // RV64-only instructions (ld/sd/lwu, the *w ops, 64-bit FP
             // conversions) need 64-bit mode, like RARS's RV64 setting.
@@ -721,7 +869,10 @@ impl Assembler {
             // RARS label-form loads/stores: `lw rd, sym` / `sw rt, sym`, and
             // the FP forms `flw fd, sym` / `fsw fs, sym`. In RV64 the same
             // path serves `ld rd, sym` / `sd rt, sym` (lui %hi + ld/sd %lo).
-            let fp_mem = matches!(info.kind, encode::InstrKind::FpLoad | encode::InstrKind::FpStore);
+            let fp_mem = matches!(
+                info.kind,
+                encode::InstrKind::FpLoad | encode::InstrKind::FpStore
+            );
             let mem_sym = matches!(ops.last(), Some(Operand::Sym(_)))
                 && matches!(info.format, Format::I | Format::S)
                 && (info.opcode == encode::LOAD
@@ -730,14 +881,30 @@ impl Assembler {
                     || info.opcode == encode::STORE_FP)
                 && self.cfg.allow_pseudo;
             if mem_sym {
-                let Operand::Sym(sym) = ops.remove(1) else { unreachable!() };
+                let Operand::Sym(sym) = ops.remove(1) else {
+                    unreachable!()
+                };
                 let rd = match ops.first() {
                     Some(Operand::Reg(r)) | Some(Operand::FReg(r)) => *r,
                     _ => 0,
                 };
-                let rd_op = if fp_mem { Operand::FReg(rd) } else { Operand::Reg(rd) };
-                self.push_basic("lui", vec![Operand::Reg(1), Operand::HiSym(sym.clone())], pos, pos);
-                self.push_basic(info.name, vec![rd_op, Operand::MemLo { sym, base: 1 }], pos, pos);
+                let rd_op = if fp_mem {
+                    Operand::FReg(rd)
+                } else {
+                    Operand::Reg(rd)
+                };
+                self.push_basic(
+                    "lui",
+                    vec![Operand::Reg(1), Operand::HiSym(sym.clone())],
+                    pos,
+                    pos,
+                );
+                self.push_basic(
+                    info.name,
+                    vec![rd_op, Operand::MemLo { sym, base: 1 }],
+                    pos,
+                    pos,
+                );
                 return;
             }
             self.raw.push(RawInstr {
@@ -746,12 +913,17 @@ impl Assembler {
                 addr: self.text_addr,
                 source: pos,
                 expanded_from: None,
+                size: 4,
             });
             self.advance(4);
             return;
         }
         if !self.cfg.allow_pseudo {
-            self.err("E-PSEUDO", format!("pseudo-instructions are disabled ('{mnemonic}')"), pos);
+            self.err(
+                "E-PSEUDO",
+                format!("pseudo-instructions are disabled ('{mnemonic}')"),
+                pos,
+            );
             self.advance(4);
             return;
         }
@@ -772,13 +944,52 @@ impl Assembler {
         if let Some(rs) = rs {
             ops.push(rs);
         }
-        self.raw.push(RawInstr { name, ops, addr: self.text_addr, source: pos, expanded_from: Some(from) });
+        self.raw.push(RawInstr {
+            name,
+            ops,
+            addr: self.text_addr,
+            source: pos,
+            expanded_from: Some(from),
+            size: 4,
+        });
         self.advance(4);
     }
 
-    fn push_basic(&mut self, name: &'static str, ops: Vec<Operand>, from: SourcePos, pos: SourcePos) {
-        self.raw.push(RawInstr { name, ops, addr: self.text_addr, source: pos, expanded_from: Some(from) });
+    fn push_basic(
+        &mut self,
+        name: &'static str,
+        ops: Vec<Operand>,
+        from: SourcePos,
+        pos: SourcePos,
+    ) {
+        self.raw.push(RawInstr {
+            name,
+            ops,
+            addr: self.text_addr,
+            source: pos,
+            expanded_from: Some(from),
+            size: 4,
+        });
         self.advance(4);
+    }
+
+    /// Push one compressed instruction (2 bytes).
+    fn push_compressed(&mut self, name: &'static str, ops: Vec<Operand>, pos: SourcePos) {
+        self.raw.push(RawInstr {
+            name: self.intern_compressed(name),
+            ops,
+            addr: self.text_addr,
+            source: pos,
+            expanded_from: None,
+            size: 2,
+        });
+        self.advance(2);
+    }
+
+    fn intern_compressed(&self, name: &str) -> &'static str {
+        // Compressed names are fixed strings; leak-free via the compressed
+        // module's known-name table lookup.
+        crate::compressed::lookup_name(name)
     }
 
     /// Expand one pseudo-instruction into basic instructions at the current
@@ -937,31 +1148,52 @@ impl Assembler {
             ("ret", []) => self.push_basic("jalr", vec![r(0), r(1), imm(0)], pos, pos),
             // CSR pseudo-ops. Read form keeps rd first; the write/set/clear
             // forms take the CSR first and route through x0 like RARS.
-            ("csrr", [Operand::Reg(rd), csr @ (Operand::Sym(_) | Operand::Reg(_) | Operand::Imm(_))]) => {
+            (
+                "csrr",
+                [Operand::Reg(rd), csr @ (Operand::Sym(_) | Operand::Reg(_) | Operand::Imm(_))],
+            ) => {
                 let (rd, csr) = (*rd, csr.clone());
                 self.push_csr_basic("csrrs", r(rd), csr, Some(r(0)), pos, pos);
             }
-            ("csrw", [csr @ (Operand::Sym(_) | Operand::Reg(_) | Operand::Imm(_)), Operand::Reg(rs)]) => {
+            (
+                "csrw",
+                [csr @ (Operand::Sym(_) | Operand::Reg(_) | Operand::Imm(_)), Operand::Reg(rs)],
+            ) => {
                 let (csr, rs) = (csr.clone(), *rs);
                 self.push_csr_basic("csrrw", r(0), csr, Some(r(rs)), pos, pos);
             }
-            ("csrs", [csr @ (Operand::Sym(_) | Operand::Reg(_) | Operand::Imm(_)), Operand::Reg(rs)]) => {
+            (
+                "csrs",
+                [csr @ (Operand::Sym(_) | Operand::Reg(_) | Operand::Imm(_)), Operand::Reg(rs)],
+            ) => {
                 let (csr, rs) = (csr.clone(), *rs);
                 self.push_csr_basic("csrrs", r(0), csr, Some(r(rs)), pos, pos);
             }
-            ("csrc", [csr @ (Operand::Sym(_) | Operand::Reg(_) | Operand::Imm(_)), Operand::Reg(rs)]) => {
+            (
+                "csrc",
+                [csr @ (Operand::Sym(_) | Operand::Reg(_) | Operand::Imm(_)), Operand::Reg(rs)],
+            ) => {
                 let (csr, rs) = (csr.clone(), *rs);
                 self.push_csr_basic("csrrc", r(0), csr, Some(r(rs)), pos, pos);
             }
-            ("csrwi", [csr @ (Operand::Sym(_) | Operand::Reg(_) | Operand::Imm(_)), Operand::Imm(v)]) => {
+            (
+                "csrwi",
+                [csr @ (Operand::Sym(_) | Operand::Reg(_) | Operand::Imm(_)), Operand::Imm(v)],
+            ) => {
                 let (csr, v) = (csr.clone(), *v);
                 self.push_csr_basic("csrrwi", r(0), csr, Some(imm(v)), pos, pos);
             }
-            ("csrsi", [csr @ (Operand::Sym(_) | Operand::Reg(_) | Operand::Imm(_)), Operand::Imm(v)]) => {
+            (
+                "csrsi",
+                [csr @ (Operand::Sym(_) | Operand::Reg(_) | Operand::Imm(_)), Operand::Imm(v)],
+            ) => {
                 let (csr, v) = (csr.clone(), *v);
                 self.push_csr_basic("csrrsi", r(0), csr, Some(imm(v)), pos, pos);
             }
-            ("csrci", [csr @ (Operand::Sym(_) | Operand::Reg(_) | Operand::Imm(_)), Operand::Imm(v)]) => {
+            (
+                "csrci",
+                [csr @ (Operand::Sym(_) | Operand::Reg(_) | Operand::Imm(_)), Operand::Imm(v)],
+            ) => {
                 let (csr, v) = (csr.clone(), *v);
                 self.push_csr_basic("csrrci", r(0), csr, Some(imm(v)), pos, pos);
             }
@@ -969,39 +1201,79 @@ impl Assembler {
                 let l = l.clone();
                 let auipc_addr = self.text_addr;
                 self.push_basic("auipc", vec![r(1), Operand::HiPcRel(l.clone())], pos, pos);
-                self.push_basic("jalr", vec![r(1), r(1), Operand::LoPcRel(l, auipc_addr)], pos, pos);
+                self.push_basic(
+                    "jalr",
+                    vec![r(1), r(1), Operand::LoPcRel(l, auipc_addr)],
+                    pos,
+                    pos,
+                );
             }
             ("tail", [Operand::Sym(l)]) => {
                 let l = l.clone();
                 let auipc_addr = self.text_addr;
                 self.push_basic("auipc", vec![r(6), Operand::HiPcRel(l.clone())], pos, pos);
-                self.push_basic("jalr", vec![r(0), r(6), Operand::LoPcRel(l, auipc_addr)], pos, pos);
+                self.push_basic(
+                    "jalr",
+                    vec![r(0), r(6), Operand::LoPcRel(l, auipc_addr)],
+                    pos,
+                    pos,
+                );
             }
             // FP pseudo-ops via the sign-inject family (canonical GNU/RARS
             // expansions: xor the sign bit for abs, flip for neg, copy for mv).
             ("fabs.s", [Operand::FReg(rd), Operand::FReg(rs)]) => {
                 let (rd, rs) = (*rd, *rs);
-                self.push_basic("fsgnjx.s", vec![Operand::FReg(rd), Operand::FReg(rs), Operand::FReg(rs)], pos, pos);
+                self.push_basic(
+                    "fsgnjx.s",
+                    vec![Operand::FReg(rd), Operand::FReg(rs), Operand::FReg(rs)],
+                    pos,
+                    pos,
+                );
             }
             ("fneg.s", [Operand::FReg(rd), Operand::FReg(rs)]) => {
                 let (rd, rs) = (*rd, *rs);
-                self.push_basic("fsgnjn.s", vec![Operand::FReg(rd), Operand::FReg(rs), Operand::FReg(rs)], pos, pos);
+                self.push_basic(
+                    "fsgnjn.s",
+                    vec![Operand::FReg(rd), Operand::FReg(rs), Operand::FReg(rs)],
+                    pos,
+                    pos,
+                );
             }
             ("fmv.s", [Operand::FReg(rd), Operand::FReg(rs)]) => {
                 let (rd, rs) = (*rd, *rs);
-                self.push_basic("fsgnj.s", vec![Operand::FReg(rd), Operand::FReg(rs), Operand::FReg(rs)], pos, pos);
+                self.push_basic(
+                    "fsgnj.s",
+                    vec![Operand::FReg(rd), Operand::FReg(rs), Operand::FReg(rs)],
+                    pos,
+                    pos,
+                );
             }
             ("fabs.d", [Operand::FReg(rd), Operand::FReg(rs)]) => {
                 let (rd, rs) = (*rd, *rs);
-                self.push_basic("fsgnjx.d", vec![Operand::FReg(rd), Operand::FReg(rs), Operand::FReg(rs)], pos, pos);
+                self.push_basic(
+                    "fsgnjx.d",
+                    vec![Operand::FReg(rd), Operand::FReg(rs), Operand::FReg(rs)],
+                    pos,
+                    pos,
+                );
             }
             ("fneg.d", [Operand::FReg(rd), Operand::FReg(rs)]) => {
                 let (rd, rs) = (*rd, *rs);
-                self.push_basic("fsgnjn.d", vec![Operand::FReg(rd), Operand::FReg(rs), Operand::FReg(rs)], pos, pos);
+                self.push_basic(
+                    "fsgnjn.d",
+                    vec![Operand::FReg(rd), Operand::FReg(rs), Operand::FReg(rs)],
+                    pos,
+                    pos,
+                );
             }
             ("fmv.d", [Operand::FReg(rd), Operand::FReg(rs)]) => {
                 let (rd, rs) = (*rd, *rs);
-                self.push_basic("fsgnj.d", vec![Operand::FReg(rd), Operand::FReg(rs), Operand::FReg(rs)], pos, pos);
+                self.push_basic(
+                    "fsgnj.d",
+                    vec![Operand::FReg(rd), Operand::FReg(rs), Operand::FReg(rs)],
+                    pos,
+                    pos,
+                );
             }
             (name, _) => {
                 self.err(
@@ -1018,9 +1290,28 @@ impl Assembler {
         let raw = std::mem::take(&mut self.raw);
         let mut statements = Vec::with_capacity(raw.len());
         for instr in &raw {
+            if instr.size == 2 {
+                match self.encode_compressed_one(instr) {
+                    Ok((word, text)) => statements.push(Statement {
+                        addr: instr.addr,
+                        encoding: word as u32,
+                        expanded_from: instr.expanded_from,
+                        source: instr.source,
+                        basic_text: Arc::from(text.as_str()),
+                        size: 2,
+                        encoding16: Some(word),
+                    }),
+                    Err((code, msg, pos)) => self.err(code, msg, pos),
+                }
+                continue;
+            }
             let Some(info) = encode::lookup(instr.name) else {
                 let (source, name) = (instr.source, instr.name);
-                self.err("E-MNEMONIC", format!("unknown instruction '{name}'"), source);
+                self.err(
+                    "E-MNEMONIC",
+                    format!("unknown instruction '{name}'"),
+                    source,
+                );
                 continue;
             };
             match self.encode_one(info, instr) {
@@ -1030,6 +1321,8 @@ impl Assembler {
                     expanded_from: instr.expanded_from,
                     source: instr.source,
                     basic_text: Arc::from(text.as_str()),
+                    size: 4,
+                    encoding16: None,
                 }),
                 Err((code, msg, pos)) => self.err(code, msg, pos),
             }
@@ -1052,10 +1345,24 @@ impl Assembler {
             }
         }
 
+        // Text addresses are linear (assembly only moves forward); collect
+        // them alongside the statements and derive the end from the final
+        // statement's full size.
+        let addrs: Vec<u32> = statements.iter().map(|st| st.addr).collect();
+        let text_end = statements
+            .last()
+            .map(|st| st.addr + st.size)
+            .unwrap_or(self.cfg.text_base);
+
         Program {
             text_base: self.cfg.text_base,
             statements,
-            data: DataImage { base: self.cfg.data_base, bytes: std::mem::take(&mut self.data) },
+            addrs,
+            text_end,
+            data: DataImage {
+                base: self.cfg.data_base,
+                bytes: std::mem::take(&mut self.data),
+            },
             extern_chunks: std::mem::take(&mut self.extern_chunks),
             symbols: std::mem::take(&mut self.symbols),
             sources: std::mem::take(&mut self.sources),
@@ -1085,19 +1392,31 @@ impl Assembler {
             Lo { sym: String, base: u8 },
         }
         let mem = match instr.ops.last() {
-            Some(Operand::Mem { off, base }) => Some(MemSpec::Off { off: *off, base: *base }),
-            Some(Operand::MemLo { sym, base }) => Some(MemSpec::Lo { sym: sym.clone(), base: *base }),
+            Some(Operand::Mem { off, base }) => Some(MemSpec::Off {
+                off: *off,
+                base: *base,
+            }),
+            Some(Operand::MemLo { sym, base }) => Some(MemSpec::Lo {
+                sym: sym.clone(),
+                base: *base,
+            }),
             _ => None,
         };
         if let Some(spec) = mem {
             if instr.ops.len() != 2 {
                 return e(
                     "E-OPERAND",
-                    format!("'{}' takes a register and an offset(base) operand", info.name),
+                    format!(
+                        "'{}' takes a register and an offset(base) operand",
+                        info.name
+                    ),
                     instr.source,
                 );
             }
-            let fp_mem = matches!(info.kind, encode::InstrKind::FpLoad | encode::InstrKind::FpStore);
+            let fp_mem = matches!(
+                info.kind,
+                encode::InstrKind::FpLoad | encode::InstrKind::FpStore
+            );
             let rx = match &instr.ops[0] {
                 Operand::Reg(r) | Operand::FReg(r) => *r,
                 _ => {
@@ -1117,17 +1436,37 @@ impl Assembler {
                 }
             };
             if !(-2048..=2047).contains(&off) {
-                return e("E-IMM", format!("offset {off} does not fit in 12 bits"), instr.source);
+                return e(
+                    "E-IMM",
+                    format!("offset {off} does not fit in 12 bits"),
+                    instr.source,
+                );
             }
-            let rx_text = if fp_mem { abi_freg_name(rx) } else { abi_name(rx) };
+            let rx_text = if fp_mem {
+                abi_freg_name(rx)
+            } else {
+                abi_name(rx)
+            };
             return match info.format {
                 Format::I => Ok((
                     encode::encode(info, &[rx as u32, base as u32, (off as u32) & 0xfff]),
-                    format!("{} {}, {}({})", info.name, rx_text, off_text, abi_name(base)),
+                    format!(
+                        "{} {}, {}({})",
+                        info.name,
+                        rx_text,
+                        off_text,
+                        abi_name(base)
+                    ),
                 )),
                 Format::S => Ok((
                     encode::encode(info, &[base as u32, rx as u32, (off as u32) & 0xfff]),
-                    format!("{} {}, {}({})", info.name, rx_text, off_text, abi_name(base)),
+                    format!(
+                        "{} {}, {}({})",
+                        info.name,
+                        rx_text,
+                        off_text,
+                        abi_name(base)
+                    ),
                 )),
                 _ => e(
                     "E-OPERAND",
@@ -1151,8 +1490,12 @@ impl Assembler {
             }
             (Format::R, _) => &[OpKind::Reg, OpKind::Reg, OpKind::Reg],
             (Format::R2, _) => &[OpKind::Reg, OpKind::Reg],
-            (Format::I, encode::InstrKind::FpLoad) => &[OpKind::FReg, OpKind::Reg, OpKind::Imm(Range::I)],
-            (Format::S, encode::InstrKind::FpStore) => &[OpKind::FReg, OpKind::Reg, OpKind::Imm(Range::I)],
+            (Format::I, encode::InstrKind::FpLoad) => {
+                &[OpKind::FReg, OpKind::Reg, OpKind::Imm(Range::I)]
+            }
+            (Format::S, encode::InstrKind::FpStore) => {
+                &[OpKind::FReg, OpKind::Reg, OpKind::Imm(Range::I)]
+            }
             (Format::I, _) if info.opcode == encode::SYSTEM => &[],
             (Format::I, _) => &[OpKind::Reg, OpKind::Reg, OpKind::Imm(Range::I)],
             (Format::Csr, _) => return self.encode_csr(info, instr),
@@ -1165,7 +1508,12 @@ impl Assembler {
         if instr.ops.len() != want.len() {
             return e(
                 "E-OPERAND",
-                format!("'{}' expects {} operand(s), found {}", info.name, want.len(), instr.ops.len()),
+                format!(
+                    "'{}' expects {} operand(s), found {}",
+                    info.name,
+                    want.len(),
+                    instr.ops.len()
+                ),
                 instr.source,
             );
         }
@@ -1175,7 +1523,10 @@ impl Assembler {
         // Shift-immediates carry funct7 in imm[11:5] and the shift amount in
         // imm[4:0]; the user writes just the amount. In RV64 the base shifts
         // widen shamt to six bits (imm[5:0]); the *iw forms stay 5-bit.
-        let shift_imm = matches!(info.name, "slli" | "srli" | "srai" | "slliw" | "srliw" | "sraiw");
+        let shift_imm = matches!(
+            info.name,
+            "slli" | "srli" | "srai" | "slliw" | "srliw" | "sraiw"
+        );
         let shamt_wide = self.cfg.rv64 && matches!(info.name, "slli" | "srli" | "srai");
         for (k, kind) in want.iter().enumerate() {
             let op = &instr.ops[k];
@@ -1191,7 +1542,11 @@ impl Assembler {
                 (OpKind::Imm(_), Operand::Imm(v)) if shift_imm => {
                     let max = if shamt_wide { 63 } else { 31 };
                     if !(0..=max).contains(v) {
-                        return e("E-IMM", format!("shift amount {v} must be between 0 and {max}"), instr.source);
+                        return e(
+                            "E-IMM",
+                            format!("shift amount {v} must be between 0 and {max}"),
+                            instr.source,
+                        );
                     }
                     let mask = if shamt_wide { 0x3f } else { 0x1f };
                     enc_ops.push((info.funct7 << 5) | ((*v as u32) & mask));
@@ -1253,11 +1608,88 @@ impl Assembler {
         Ok((word, text))
     }
 
-    fn resolve_sym(&self, name: &str, pos: SourcePos) -> Result<u32, (&'static str, String, SourcePos)> {
-        self.symbols
-            .get(name)
-            .map(|s| s.addr)
-            .ok_or(("E-UNDEF", format!("undefined symbol '{name}'"), pos))
+    fn resolve_sym(
+        &self,
+        name: &str,
+        pos: SourcePos,
+    ) -> Result<u32, (&'static str, String, SourcePos)> {
+        self.symbols.get(name).map(|s| s.addr).ok_or((
+            "E-UNDEF",
+            format!("undefined symbol '{name}'"),
+            pos,
+        ))
+    }
+
+    /// Encode one compressed statement. Symbols resolve to pc-relative byte
+    /// deltas for branches and jumps, absolute values elsewhere.
+    fn encode_compressed_one(
+        &self,
+        instr: &RawInstr,
+    ) -> Result<(u16, String), (&'static str, String, SourcePos)> {
+        let mut cops: Vec<crate::compressed::COp> = Vec::with_capacity(instr.ops.len());
+        // Loads/stores arrive as [reg, Mem]; flatten to the encoder's order.
+        let mem = match instr.ops.last() {
+            Some(o @ (Operand::Mem { .. } | Operand::MemLo { .. })) => Some(o.clone()),
+            _ => None,
+        };
+        for op in &instr.ops {
+            match op {
+                // Trailing Mem operands are flattened separately below.
+                Operand::Mem { .. } | Operand::MemLo { .. } => {}
+                Operand::Reg(r) => cops.push(crate::compressed::COp::Reg(*r)),
+                Operand::Imm(v) => cops.push(crate::compressed::COp::Imm(*v)),
+                Operand::Sym(name) => {
+                    let target = self.symbols.get(name).map(|s| s.addr as i64).ok_or((
+                        "E-UNDEF",
+                        format!("undefined symbol '{name}'"),
+                        instr.source,
+                    ))?;
+                    cops.push(crate::compressed::COp::Imm(target - instr.addr as i64));
+                }
+                other => {
+                    return Err((
+                        "E-OPERAND",
+                        format!("operand not supported by compressed instructions: {other:?}"),
+                        instr.source,
+                    ))
+                }
+            }
+        }
+        // For a trailing Mem operand, splice base and offset into place and
+        // drop the marker so the encoder sees plain register/offset lists.
+        let cops = if let Some(Operand::Mem { off, base }) = mem {
+            let mut v = cops;
+            match instr.name {
+                // c.lw rd, off(base): [rd] -> [rd, base, off].
+                "c.lw" | "c.ld" => {
+                    v.push(crate::compressed::COp::Reg(base));
+                    v.push(crate::compressed::COp::Imm(off));
+                    v
+                }
+                // c.sw rs2, off(base): [rs2] -> [rs2, base, off].
+                "c.sw" | "c.sd" => {
+                    v.push(crate::compressed::COp::Reg(base));
+                    v.push(crate::compressed::COp::Imm(off));
+                    v
+                }
+                // c.lwsp rd, off(sp): [rd] -> [rd, off].
+                "c.lwsp" | "c.ldsp" => {
+                    v.push(crate::compressed::COp::Imm(off));
+                    v
+                }
+                // c.swsp rs2, off(sp): [rs2] -> [rs2, off].
+                "c.swsp" | "c.sdsp" => {
+                    v.push(crate::compressed::COp::Imm(off));
+                    v
+                }
+                _ => v,
+            }
+        } else {
+            cops
+        };
+        let (word, text) = crate::compressed::encode(instr.name, &cops)
+            .map_err(|(code, msg)| (code, msg, instr.source))?;
+        Ok((word, text))
     }
 
     /// `csrrw rd, csr, rs1` family. The CSR operand accepts names from the
@@ -1272,12 +1704,20 @@ impl Assembler {
         if instr.ops.len() != 3 {
             return e(
                 "E-OPERAND",
-                format!("'{}' expects 3 operand(s), found {}", info.name, instr.ops.len()),
+                format!(
+                    "'{}' expects 3 operand(s), found {}",
+                    info.name,
+                    instr.ops.len()
+                ),
                 instr.source,
             );
         }
         let Operand::Reg(rd) = instr.ops[0] else {
-            return e("E-OPERAND", format!("'{}' expects a destination register first", info.name), instr.source);
+            return e(
+                "E-OPERAND",
+                format!("'{}' expects a destination register first", info.name),
+                instr.source,
+            );
         };
         let csr_num = match &instr.ops[1] {
             // RARS lets a register-style number name the CSR (x0 = 0).
@@ -1293,24 +1733,59 @@ impl Assembler {
                     )
                 }
             },
-            _ => return e("E-OPERAND", format!("'{}' expects a CSR name or number second", info.name), instr.source),
+            _ => {
+                return e(
+                    "E-OPERAND",
+                    format!("'{}' expects a CSR name or number second", info.name),
+                    instr.source,
+                )
+            }
         };
         let immediate_form = info.funct3 >= 5;
         let third = match (&instr.ops[2], immediate_form) {
             (Operand::Reg(r), false) => *r as u32,
             (Operand::Sym(name), false) => match reg_by_name(name) {
                 Some(r) => r as u32,
-                None => return e("E-OPERAND", format!("'{}' expects a source register third", info.name), instr.source),
+                None => {
+                    return e(
+                        "E-OPERAND",
+                        format!("'{}' expects a source register third", info.name),
+                        instr.source,
+                    )
+                }
             },
             (Operand::Imm(v), true) if (0..=31).contains(v) => *v as u32,
             (Operand::Imm(_), true) => {
-                return e("E-IMM", "the immediate form of this CSR instruction takes 0 to 31".into(), instr.source)
+                return e(
+                    "E-IMM",
+                    "the immediate form of this CSR instruction takes 0 to 31".into(),
+                    instr.source,
+                )
             }
-            _ => return e("E-OPERAND", format!("'{}' expects a register or immediate third", info.name), instr.source),
+            _ => {
+                return e(
+                    "E-OPERAND",
+                    format!("'{}' expects a register or immediate third", info.name),
+                    instr.source,
+                )
+            }
         };
         let word = encode::encode(info, &[rd as u32, csr_num, third]);
-        let third_text = if immediate_form { third.to_string() } else { abi_name(third as u8).to_string() };
-        Ok((word, format!("{} {}, 0x{:03x}, {}", info.name, abi_name(rd), csr_num, third_text)))
+        let third_text = if immediate_form {
+            third.to_string()
+        } else {
+            abi_name(third as u8).to_string()
+        };
+        Ok((
+            word,
+            format!(
+                "{} {}, 0x{:03x}, {}",
+                info.name,
+                abi_name(rd),
+                csr_num,
+                third_text
+            ),
+        ))
     }
 }
 
@@ -1333,10 +1808,17 @@ fn substitute_params(line: &[Token], params: &[String], args: &[Vec<Token>]) -> 
             out.push(t.clone());
             continue;
         };
-        match params.iter().position(|p| p == text).and_then(|k| args.get(k)) {
+        match params
+            .iter()
+            .position(|p| p == text)
+            .and_then(|k| args.get(k))
+        {
             Some(arg) => {
                 for a in arg {
-                    out.push(Token { tok: a.tok.clone(), pos: t.pos });
+                    out.push(Token {
+                        tok: a.tok.clone(),
+                        pos: t.pos,
+                    });
                 }
             }
             None => out.push(t.clone()),
@@ -1367,7 +1849,9 @@ fn check_branch(delta: i64) -> Result<(), String> {
         return Err(format!("branch target offset {delta} is not even"));
     }
     if !(-4096..=4094).contains(&delta) {
-        return Err(format!("branch target offset {delta} exceeds the 13-bit branch range"));
+        return Err(format!(
+            "branch target offset {delta} exceeds the 13-bit branch range"
+        ));
     }
     Ok(())
 }
@@ -1382,8 +1866,9 @@ fn hi_lo(v: i64) -> (i64, i64) {
 }
 
 const ABI: &[&str] = &[
-    "zero", "ra", "sp", "gp", "tp", "t0", "t1", "t2", "s0", "s1", "a0", "a1", "a2", "a3", "a4", "a5",
-    "a6", "a7", "s2", "s3", "s4", "s5", "s6", "s7", "s8", "s9", "s10", "s11", "t3", "t4", "t5", "t6",
+    "zero", "ra", "sp", "gp", "tp", "t0", "t1", "t2", "s0", "s1", "a0", "a1", "a2", "a3", "a4",
+    "a5", "a6", "a7", "s2", "s3", "s4", "s5", "s6", "s7", "s8", "s9", "s10", "s11", "t3", "t4",
+    "t5", "t6",
 ];
 
 /// FP ABI register names in numeric order (RISC-V calling convention:
@@ -1464,13 +1949,25 @@ mod tests {
     use crate::Severity;
 
     fn asm(src: &str) -> crate::AsmResult {
-        let files = vec![InputFile { name: "t.s".into(), source: src.into() }];
+        let files = vec![InputFile {
+            name: "t.s".into(),
+            source: src.into(),
+        }];
         crate::assemble(&files, &AsmConfig::default())
     }
 
     fn asm_cfg(src: &str, rv64: bool) -> crate::AsmResult {
-        let files = vec![InputFile { name: "t.s".into(), source: src.into() }];
-        crate::assemble(&files, &AsmConfig { rv64, ..AsmConfig::default() })
+        let files = vec![InputFile {
+            name: "t.s".into(),
+            source: src.into(),
+        }];
+        crate::assemble(
+            &files,
+            &AsmConfig {
+                rv64,
+                ..AsmConfig::default()
+            },
+        )
     }
 
     fn asm64(src: &str) -> crate::AsmResult {
@@ -1522,9 +2019,7 @@ mod tests {
 
     #[test]
     fn branch_forward_and_back() {
-        let r = asm(
-            "start: beqz a0, start\n j end\nend: bnez a0, start\n",
-        );
+        let r = asm("start: beqz a0, start\n j end\nend: bnez a0, start\n");
         assert!(!r.has_errors(), "diags: {:?}", r.diagnostics);
         let p = r.program.unwrap();
         let base = p.text_base;
@@ -1692,15 +2187,16 @@ wfi
     fn macro_arity_mismatch_is_error() {
         let r = asm(".macro pair(%a, %b)\n    add %a, %b, zero\n.end_macro\npair(a0)\n");
         assert!(r.has_errors());
-        assert!(r.diagnostics.iter().any(|d| d.code == "E-OPERAND" && d.message.contains("pair")));
+        assert!(r
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "E-OPERAND" && d.message.contains("pair")));
     }
 
     #[test]
     fn macro_calls_macro() {
-        let r = asm(
-            ".macro inner(%r)\n    addi %r, %r, 4\n.end_macro\n\
-             .macro outer(%r)\n    inner(%r)\n    addi %r, %r, 1\n.end_macro\nouter(a0)\n",
-        );
+        let r = asm(".macro inner(%r)\n    addi %r, %r, 4\n.end_macro\n\
+             .macro outer(%r)\n    inner(%r)\n    addi %r, %r, 1\n.end_macro\nouter(a0)\n");
         assert!(!r.has_errors(), "diags: {:?}", r.diagnostics);
         let p = r.program.unwrap();
         assert_eq!(p.statements.len(), 2);
@@ -1712,21 +2208,33 @@ wfi
     fn macro_recursion_hits_depth_cap() {
         let r = asm(".macro spin\n    spin()\n.end_macro\nspin()\n");
         assert!(r.has_errors());
-        let hits = r.diagnostics.iter().filter(|d| d.code == "E-MACRO-DEPTH").count();
-        assert_eq!(hits, 1, "depth abort should stop the chain instead of erroring per frame");
+        let hits = r
+            .diagnostics
+            .iter()
+            .filter(|d| d.code == "E-MACRO-DEPTH")
+            .count();
+        assert_eq!(
+            hits, 1,
+            "depth abort should stop the chain instead of erroring per frame"
+        );
     }
 
     #[test]
     fn unknown_macro_call_keeps_mnemonic_error() {
         let r = asm("nosuch(a0, a1)\n");
         assert!(r.has_errors());
-        assert!(r.diagnostics.iter().any(|d| d.code == "E-MNEMONIC" && d.message.contains("nosuch")));
+        assert!(r
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "E-MNEMONIC" && d.message.contains("nosuch")));
     }
 
     #[test]
     fn eqv_inside_macro_body() {
         // .eqv applies at expansion time and sticks for later lines too.
-        let r = asm(".macro setv(%r)\n    .eqv VAL 9\n    li %r, VAL\n.end_macro\nsetv(a0)\nli a1, VAL\n");
+        let r = asm(
+            ".macro setv(%r)\n    .eqv VAL 9\n    li %r, VAL\n.end_macro\nsetv(a0)\nli a1, VAL\n",
+        );
         assert!(!r.has_errors(), "diags: {:?}", r.diagnostics);
         let p = r.program.unwrap();
         assert_eq!(p.statements[0].encoding, 0x0090_0513); // addi a0, zero, 9
@@ -1749,7 +2257,10 @@ wfi
     fn unterminated_macro_is_error() {
         let r = asm(".macro loose\n    nop\n");
         assert!(r.has_errors());
-        assert!(r.diagnostics.iter().any(|d| d.code == "E-DIRECTIVE" && d.message.contains(".end_macro")));
+        assert!(r
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "E-DIRECTIVE" && d.message.contains(".end_macro")));
     }
 
     #[test]
@@ -1850,11 +2361,22 @@ wfi
         let d = &r.diagnostics[0];
         assert_eq!(d.code, "E-XLEN");
         assert!(d.message.contains("64-bit"));
-        for src in ["sd a0, 0(sp)\n", "lwu a0, 0(sp)\n", "addiw a0, a1, 1\n", "addw a0, a1, a2\n",
-            "mulw a0, a1, a2\n", "slliw a0, a1, 3\n", "fcvt.l.s a0, f1\n", "fmv.x.d a0, f1\n"] {
+        for src in [
+            "sd a0, 0(sp)\n",
+            "lwu a0, 0(sp)\n",
+            "addiw a0, a1, 1\n",
+            "addw a0, a1, a2\n",
+            "mulw a0, a1, a2\n",
+            "slliw a0, a1, 3\n",
+            "fcvt.l.s a0, f1\n",
+            "fmv.x.d a0, f1\n",
+        ] {
             let r = asm(src);
             assert!(r.has_errors(), "RV32 should reject: {src}");
-            assert!(r.diagnostics.iter().any(|d| d.code == "E-XLEN"), "want E-XLEN for {src}");
+            assert!(
+                r.diagnostics.iter().any(|d| d.code == "E-XLEN"),
+                "want E-XLEN for {src}"
+            );
         }
         // RV64 mode accepts all of them.
         let r = asm64("ld a0, 0(sp)\nsd a0, 8(sp)\nlwu a1, -4(sp)\naddiw a0, a1, 1\naddw a2, a1, a1\nmulw a3, a1, a1\nfcvt.l.s a0, f1\nfmv.x.d a0, f1\nfmv.d.x f1, a0\n");
@@ -1868,7 +2390,8 @@ wfi
 
     #[test]
     fn rv64_load_store_and_wide_shift_encodings() {
-        let r = asm64("ld a0, 8(sp)\nsd a0, 8(sp)\nlwu a1, -4(sp)\nslli a2, a1, 33\nsrai a3, a1, 40\n");
+        let r =
+            asm64("ld a0, 8(sp)\nsd a0, 8(sp)\nlwu a1, -4(sp)\nslli a2, a1, 33\nsrai a3, a1, 40\n");
         assert!(!r.has_errors(), "diags: {:?}", r.diagnostics);
         let p = r.program.unwrap();
         assert_eq!(p.statements[0].encoding, 0x0081_3503); // ld a0, 8(sp)
@@ -1951,7 +2474,7 @@ wfi
         // -2048 so hi compensates to 1.
         assert_eq!(p.statements[0].encoding, 0x0000_1537); // lui a0, 1
         assert_eq!(p.statements[1].encoding, 0x8005_051b); // addiw a0, a0, -2048
-        // 64-bit tier kicks in outside the signed 32-bit range.
+                                                           // 64-bit tier kicks in outside the signed 32-bit range.
         let r = asm64("li a0, 2147483648\nli a1, -2147483649\n");
         assert!(!r.has_errors(), "diags: {:?}", r.diagnostics);
         assert_eq!(r.program.unwrap().statements.len(), 16);
@@ -2046,7 +2569,12 @@ wfi
 
     #[test]
     fn extern_size_must_be_positive() {
-        for src in [".extern a\n", ".extern a 0\n", ".extern a -4\n", ".extern 8\n"] {
+        for src in [
+            ".extern a\n",
+            ".extern a 0\n",
+            ".extern a -4\n",
+            ".extern 8\n",
+        ] {
             let r = asm(src);
             assert!(r.has_errors(), "should reject: {src}");
             assert!(
@@ -2072,12 +2600,85 @@ wfi
 
     #[test]
     fn extern_base_follows_config() {
-        let files = vec![InputFile { name: "t.s".into(), source: ".extern a 4\n".into() }];
-        let cfg = AsmConfig { extern_base: 0x2000_0000, ..AsmConfig::default() };
+        let files = vec![InputFile {
+            name: "t.s".into(),
+            source: ".extern a 4\n".into(),
+        }];
+        let cfg = AsmConfig {
+            extern_base: 0x2000_0000,
+            ..AsmConfig::default()
+        };
         let r = crate::assemble(&files, &cfg);
         assert!(!r.has_errors());
         let p = r.program.unwrap();
         assert_eq!(p.symbols.get("a").unwrap().addr, 0x2000_0000);
         assert_eq!(p.extern_chunks[0].0, 0x2000_0000);
+    }
+}
+
+#[cfg(test)]
+mod compressed_tests {
+    use super::*;
+
+    fn asm_c(src: &str) -> crate::AsmResult {
+        let files = vec![InputFile {
+            name: "c.s".into(),
+            source: src.into(),
+        }];
+        crate::assemble(
+            &files,
+            &AsmConfig {
+                allow_compressed: true,
+                ..AsmConfig::default()
+            },
+        )
+    }
+
+    #[test]
+    fn compressed_program_sizes_and_encodings() {
+        let r = asm_c(
+            "c.addi a0, 1\nc.li a1, 5\nc.swsp a1, 4(sp)\nc.lwsp a0, 4(sp)\nc.beqz a0, skip\nc.j skip\nc.nop\nskip:\nc.ebreak\n",
+        );
+        assert!(!r.has_errors(), "diags: {:?}", r.diagnostics);
+        let p = r.program.unwrap();
+        // Sizes: everything is 2 bytes, including the compressed c.ebreak.
+        assert_eq!(p.text_end(), p.text_base + 16);
+        assert_eq!(p.statements[0].size, 2);
+        assert_eq!(p.statements[7].size, 2);
+        // c.addi a0, 1 = 0x0505.
+        assert_eq!(p.statements[0].encoding16, Some(0x0505));
+        // c.j skip: forward jump over 2 bytes (c.nop) + 2 (c.ebreak) = 4.
+        assert_eq!(p.statements[5].basic_text.as_ref(), "j 4");
+        // Addresses progress by size: 0, 2, 4, 6, 8, 10, 12, 14.
+        assert_eq!(
+            p.addrs,
+            [0, 2, 4, 6, 8, 10, 12, 14].map(|v| p.text_base + v)
+        );
+    }
+
+    #[test]
+    fn compressed_disabled_rejects() {
+        let files = vec![InputFile {
+            name: "c.s".into(),
+            source: "c.addi a0, 1\n".into(),
+        }];
+        let r = crate::assemble(&files, &AsmConfig::default());
+        assert!(r.has_errors());
+        assert_eq!(r.diagnostics[0].code, "E-XLEN");
+    }
+
+    #[test]
+    fn compressed_register_slice_enforced() {
+        let r = asm_c("c.addi4spn t0, 4\n"); // a0 = x10 is not in x8..x15
+        assert!(r.has_errors());
+        assert_eq!(r.diagnostics[0].code, "E-OPERAND");
+        // a0 (x10) is inside the slice and assembles.
+        let ok = asm_c("c.addi4spn a0, 4");
+        assert!(!ok.has_errors(), "diags: {:?}", ok.diagnostics);
+        // c.lw requires a sliced base; sp is rejected (c.lwsp is the sp-relative form).
+        let sp = asm_c("c.lw a0, 4(sp)");
+        assert!(sp.has_errors());
+        let ok_lw = asm_c("c.lw a0, 0(a0)");
+        assert!(!ok_lw.has_errors(), "diags: {:?}", ok_lw.diagnostics);
     }
 }

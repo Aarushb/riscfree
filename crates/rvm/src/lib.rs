@@ -3,11 +3,12 @@
 //! flows through `Host` and returned events.
 
 mod cconv;
+mod compressed;
 mod exec;
 mod fp;
 mod host;
-mod mmio;
 mod memory;
+mod mmio;
 mod syscalls;
 mod trap;
 mod watch;
@@ -88,12 +89,32 @@ pub enum Event {
 /// One observed state change, for UI views and narration.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Change {
-    Reg { index: usize, old: u64, new: u64 },
+    Reg {
+        index: usize,
+        old: u64,
+        new: u64,
+    },
     /// Floating-point register write (raw NaN-boxed bits).
-    FReg { index: usize, old: u64, new: u64 },
-    Csr { id: u16, old: u64, new: u64 },
-    Mem { addr: u32, old: u64, new: u64, width: u8 },
-    Pc { old: u32, new: u32 },
+    FReg {
+        index: usize,
+        old: u64,
+        new: u64,
+    },
+    Csr {
+        id: u16,
+        old: u64,
+        new: u64,
+    },
+    Mem {
+        addr: u32,
+        old: u64,
+        new: u64,
+        width: u8,
+    },
+    Pc {
+        old: u32,
+        new: u32,
+    },
 }
 
 #[derive(Debug, Default)]
@@ -128,18 +149,39 @@ enum Undo {
     /// Marker that this statement retired an instruction, carrying the
     /// opcode (encoding bits 6:0) so backstep rewinds `instret` and the
     /// per-opcode counters together. Traps and parked wfis do not retire.
-    Retired { opcode: u32 },
-    Reg { index: usize, old: u64 },
-    FReg { index: usize, old: u64 },
-    Csr { id: u16, old: u64 },
-    Mem { addr: u32, old: u64, width: u8 },
-    Pc { old: u32 },
+    Retired {
+        opcode: u32,
+    },
+    Reg {
+        index: usize,
+        old: u64,
+    },
+    FReg {
+        index: usize,
+        old: u64,
+    },
+    Csr {
+        id: u16,
+        old: u64,
+    },
+    Mem {
+        addr: u32,
+        old: u64,
+        width: u8,
+    },
+    Pc {
+        old: u32,
+    },
     /// Memcheck shadow: this byte was uninitialized before the statement's
     /// store initialized it; undo clears the flag so a memcheck halt after a
     /// backstep replays identically. Only pushed when memcheck is on.
-    ShadowWasUninit { addr: u32 },
+    ShadowWasUninit {
+        addr: u32,
+    },
     /// A trap consumed the timer's current tick; undo reschedules it.
-    TimerDeadline { old: u64 },
+    TimerDeadline {
+        old: u64,
+    },
     /// A trap consumed the transmitter's edge request; undo re-latches it.
     XmitEdge,
     /// A trap cleared the software request; undo re-raises it.
@@ -147,7 +189,9 @@ enum Undo {
     /// A trap consumed the keypad request; undo re-raises it.
     HexKeys,
     /// `wfi` parked the hart; undo un-parks.
-    Waiting { old: bool },
+    Waiting {
+        old: bool,
+    },
     /// Calling-convention checker: a call pushed an activation record; undo
     /// pops it so backstepping over a call rewinds the checker's stack.
     CcPush,
@@ -163,7 +207,10 @@ struct Journal {
 
 impl Journal {
     fn new(cap: usize) -> Self {
-        Journal { records: VecDeque::with_capacity(cap.min(4096)), cap }
+        Journal {
+            records: VecDeque::with_capacity(cap.min(4096)),
+            cap,
+        }
     }
 
     fn push(&mut self, u: Undo) {
@@ -319,17 +366,24 @@ impl Machine {
             active_pc: 0,
         };
         m.regs[3] = 0x1000_8000; // gp
-        m.regs[2] = 0x7fff_effc; // sp
+        m.regs[2] = 0x7fff_eff8; // sp (8-byte aligned)
         m.load_program_image();
         m
     }
 
     fn load_program_image(&mut self) {
         for s in &self.program.statements {
-            self.mem.write_bytes(s.addr, &s.encoding.to_le_bytes());
+            match s.encoding16 {
+                Some(hw) => {
+                    let bytes = hw.to_le_bytes();
+                    self.mem.write_bytes(s.addr, &bytes);
+                }
+                None => self.mem.write_bytes(s.addr, &s.encoding.to_le_bytes()),
+            }
         }
         if !self.program.data.bytes.is_empty() {
-            self.mem.write_bytes(self.program.data.base, &self.program.data.bytes);
+            self.mem
+                .write_bytes(self.program.data.base, &self.program.data.bytes);
         }
         // `.extern` reservations: zero-fill the reserved regions so the
         // addresses the symbols point at exist in the image (they read zero
@@ -344,7 +398,8 @@ impl Machine {
                 self.shadow.mark_init(s.addr, 4);
             }
             if !self.program.data.bytes.is_empty() {
-                self.shadow.mark_init(self.program.data.base, self.program.data.bytes.len() as u32);
+                self.shadow
+                    .mark_init(self.program.data.base, self.program.data.bytes.len() as u32);
             }
             for (addr, bytes) in &self.program.extern_chunks {
                 self.shadow.mark_init(*addr, bytes.len() as u32);
@@ -366,12 +421,15 @@ impl Machine {
 
     pub fn freg(&self, index: usize) -> u64 {
         self.fregs[index]
-    }    pub fn csr(&self, id: u16) -> u64 {
+    }
+    pub fn csr(&self, id: u16) -> u64 {
         match id {
             // Sequential model: cycle/time track instret. `time` reads as the
             // retired-instruction clock; the wall-clock time stays with the
             // host-driven time syscall (a7 = 30).
-            csr::CYCLE | csr::CYCLEH | csr::TIME | csr::TIMEH | csr::INSTRET | csr::INSTRETH => self.instret,
+            csr::CYCLE | csr::CYCLEH | csr::TIME | csr::TIMEH | csr::INSTRET | csr::INSTRETH => {
+                self.instret
+            }
             other => self.csrs.get(&other).copied().unwrap_or(0),
         }
     }
@@ -431,8 +489,11 @@ impl Machine {
 
     pub(crate) fn valid_addr(&self, addr: u32) -> bool {
         let l = &self.layout;
+        // The data..kernel span covers data, heap, and the whole stack
+        // segment, including the scratch space above the initial sp that
+        // compressed push/pop offsets can reach.
         (addr >= l.text_base && addr < l.text_base + l.text_len)
-            || (addr >= l.data_base && addr < l.stack_top)
+            || (addr >= l.data_base && addr < l.kernel_base)
             || (addr >= l.kernel_base)
     }
 
@@ -458,7 +519,12 @@ impl Machine {
             // Hart parked at a wfi: see whether anything can wake it. A
             // stalled wake keeps the machine waiting and reports a no-op.
             if !self.refresh_wake() {
-                return StepOutcome { executed: false, pc_before: self.pc, events: Vec::new(), changes: Vec::new() };
+                return StepOutcome {
+                    executed: false,
+                    pc_before: self.pc,
+                    events: Vec::new(),
+                    changes: Vec::new(),
+                };
             }
             self.waiting = false;
         }
@@ -472,26 +538,59 @@ impl Machine {
         if !self.in_text(self.pc) {
             return self.dropped_off();
         }
-        if (self.pc & 0x3) != 0 {
-            // A misaligned fetch is a synchronous exception like any other
-            // once a handler is installed; without utvec it halts as before.
+        // Instruction fetches are 2-byte aligned; a 4-byte fetch whose low
+        // two bits are not 11 is misaligned only for the uncompressed set,
+        // so the alignment trap fires after the compressed fetch decides.
+        if (self.pc & 0x1) != 0 {
             let pc = self.pc;
             if self.read_csr(csr::UTVEC) != 0 {
-                let mut out = StepOutcome { executed: false, pc_before: pc, events: Vec::new(), changes: Vec::new() };
-                self.take_trap(crate::trap::exc::INSN_MISALIGNED, u64::from(pc), false, pc, &mut out.changes);
+                let mut out = StepOutcome {
+                    executed: false,
+                    pc_before: pc,
+                    events: Vec::new(),
+                    changes: Vec::new(),
+                };
+                self.take_trap(
+                    crate::trap::exc::INSN_MISALIGNED,
+                    u64::from(pc),
+                    false,
+                    pc,
+                    &mut out.changes,
+                );
                 return self.trap_entry_breakpoint(out);
             }
-            return self.error(format!("instruction address 0x{pc:08x} is not word-aligned"));
+            return self.error(format!(
+                "instruction address 0x{pc:08x} is not 2-byte aligned"
+            ));
         }
 
         self.journal.begin_statement();
         let pc_before = self.pc;
         self.journal.push(Undo::Pc { old: pc_before });
-        self.pc += 4;
 
-        let Ok(word) = self.mem.read_u32(pc_before) else {
-            return self.error(format!("cannot fetch instruction at 0x{pc_before:08x}"));
+        // Compressed instructions are 2 bytes (their low two bits differ
+        // from 11) and expand to their 32-bit equivalents before decode; the
+        // pc advance follows the fetched size.
+        let (word, instr_size) = match self.mem.read_u16(pc_before) {
+            Ok(hw) if (hw & 0x3) != 0x3 => {
+                match crate::compressed::expand_compressed(hw, self.config.rv64) {
+                    Some(word) => (word, 2u32),
+                    None => {
+                        return self.error(format!(
+                            "reserved compressed encoding 0x{hw:04x} at 0x{pc_before:08x}"
+                        ))
+                    }
+                }
+            }
+            Ok(_) => match self.mem.read_u32(pc_before) {
+                Ok(word) => (word, 4u32),
+                Err(e) => return self.error(e.to_string()),
+            },
+            Err(e) => {
+                return self.error(format!("{e} (at pc 0x{pc_before:08x})"));
+            }
         };
+        self.pc = pc_before + instr_size;
 
         // Watch/memcheck descriptions raised mid-instruction name this pc
         // (the load/store helpers see the already-advanced pc). Cleared up
@@ -526,8 +625,8 @@ impl Machine {
                 if self.read_csr(csr::UTVEC) != 0 {
                     let mut out = outcome.outcome;
                     out.events.clear(); // the deferred error halt never happened
-                    // The faulting instruction did not retire: uepc points
-                    // back at it so uret can retry (or report) it.
+                                        // The faulting instruction did not retire: uepc points
+                                        // back at it so uret can retry (or report) it.
                     self.take_trap(cause, tval, false, pc_before, &mut out.changes);
                     return self.trap_entry_breakpoint(out);
                 }
@@ -686,7 +785,7 @@ impl Machine {
         self.fregs = [0; 32];
         self.csrs.clear();
         self.regs[3] = 0x1000_8000;
-        self.regs[2] = 0x7fff_effc;
+        self.regs[2] = 0x7fff_eff8;
         self.pc = self.program.text_base;
         self.mem.clear();
         self.load_program_image();
@@ -728,9 +827,11 @@ impl Machine {
         top &= !0x3;
         top -= 4 * (args.len() as u32 + 1);
         for (i, addr) in string_addrs.iter().enumerate() {
-            self.mem.write_bytes(top + 4 * i as u32, &addr.to_le_bytes());
+            self.mem
+                .write_bytes(top + 4 * i as u32, &addr.to_le_bytes());
         }
-        self.mem.write_bytes(top + 4 * args.len() as u32, &0u32.to_le_bytes());
+        self.mem
+            .write_bytes(top + 4 * args.len() as u32, &0u32.to_le_bytes());
         // Memcheck: the argv block the program is entitled to read (strings,
         // NULs, and the pointer array) counts as initialized.
         if self.config.memcheck {
@@ -749,7 +850,11 @@ impl Machine {
         let old = self.regs[index];
         self.journal.push(Undo::Reg { index, old });
         self.regs[index] = value;
-        changes.push(Change::Reg { index, old, new: value });
+        changes.push(Change::Reg {
+            index,
+            old,
+            new: value,
+        });
         self.check_reg_watch(index);
     }
 
@@ -757,7 +862,11 @@ impl Machine {
         let old = self.fregs[index];
         self.journal.push(Undo::FReg { index, old });
         self.fregs[index] = value;
-        changes.push(Change::FReg { index, old, new: value });
+        changes.push(Change::FReg {
+            index,
+            old,
+            new: value,
+        });
     }
 
     /// OR exception bits into fflags, the way FP instructions accumulate
@@ -783,7 +892,11 @@ impl Machine {
         let old = self.csrs.get(&id).copied().unwrap_or(0);
         self.journal.push(Undo::Csr { id, old });
         self.csrs.insert(id, value);
-        changes.push(Change::Csr { id, old, new: value });
+        changes.push(Change::Csr {
+            id,
+            old,
+            new: value,
+        });
     }
 
     fn write_fp_csr(&mut self, id: u16, value: u64, changes: &mut Vec<Change>) {
@@ -806,20 +919,34 @@ impl Machine {
             }
             self.journal.push(Undo::Csr { id: csr_id, old });
             self.csrs.insert(csr_id, v);
-            changes.push(Change::Csr { id: csr_id, old, new: v });
+            changes.push(Change::Csr {
+                id: csr_id,
+                old,
+                new: v,
+            });
         }
     }
 
     pub(crate) fn read_csr(&self, id: u16) -> u64 {
         match id {
-            csr::CYCLE | csr::CYCLEH | csr::TIME | csr::TIMEH | csr::INSTRET | csr::INSTRETH => self.instret,
+            csr::CYCLE | csr::CYCLEH | csr::TIME | csr::TIMEH | csr::INSTRET | csr::INSTRETH => {
+                self.instret
+            }
             other => self.csrs.get(&other).copied().unwrap_or(0),
         }
     }
 
-    pub(crate) fn load_bytes(&mut self, addr: u32, width: u32, changes: &mut Vec<Change>) -> Result<u64, MemError> {
+    pub(crate) fn load_bytes(
+        &mut self,
+        addr: u32,
+        width: u32,
+        changes: &mut Vec<Change>,
+    ) -> Result<u64, MemError> {
         if !self.config.allow_unaligned && !addr.is_multiple_of(width) {
-            return Err(MemError::Unaligned { addr, width });
+            return Err(MemError::Unaligned {
+                addr: addr.wrapping_sub(self.active_pc),
+                width,
+            });
         }
         // MMIO registers answer before the memory path; device reads have
         // side effects (receiver data pops a key), so no journal entry.
@@ -828,7 +955,12 @@ impl Machine {
                 let host: &mut dyn Host = &mut *self.host;
                 self.mmio.load(addr, width, host)
             };
-            changes.push(Change::Mem { addr, old: 0, new: val, width: width as u8 });
+            changes.push(Change::Mem {
+                addr,
+                old: 0,
+                new: val,
+                width: width as u8,
+            });
             // Device reads are watched like memory reads; memcheck is
             // exempt (device semantics, not memory).
             self.check_mem_watch(addr, width, false);
@@ -852,12 +984,22 @@ impl Machine {
             self.check_memcheck_load(addr, width);
         }
         self.check_mem_watch(addr, width, false);
-        changes.push(Change::Mem { addr, old: 0, new: val, width: width as u8 });
+        changes.push(Change::Mem {
+            addr,
+            old: 0,
+            new: val,
+            width: width as u8,
+        });
         Ok(val)
     }
 
     /// Sign-extended load helper (lb/lh/lw).
-    pub(crate) fn load_signed(&mut self, addr: u32, width: u32, changes: &mut Vec<Change>) -> Result<u64, MemError> {
+    pub(crate) fn load_signed(
+        &mut self,
+        addr: u32,
+        width: u32,
+        changes: &mut Vec<Change>,
+    ) -> Result<u64, MemError> {
         let v = self.load_bytes(addr, width, changes)?;
         Ok(match width {
             1 => v as u8 as i8 as i64 as u64,
@@ -866,9 +1008,18 @@ impl Machine {
         })
     }
 
-    pub(crate) fn store_bytes(&mut self, addr: u32, value: u64, width: u32, changes: &mut Vec<Change>) -> Result<(), MemError> {
+    pub(crate) fn store_bytes(
+        &mut self,
+        addr: u32,
+        value: u64,
+        width: u32,
+        changes: &mut Vec<Change>,
+    ) -> Result<(), MemError> {
         if !self.config.allow_unaligned && !addr.is_multiple_of(width) {
-            return Err(MemError::Unaligned { addr, width });
+            return Err(MemError::Unaligned {
+                addr: addr.wrapping_sub(self.active_pc),
+                width,
+            });
         }
         // MMIO registers swallow the store (device side effects instead of
         // memory); the effects (output, key consumption) cannot be undone,
@@ -878,7 +1029,12 @@ impl Machine {
                 let host: &mut dyn Host = &mut *self.host;
                 self.mmio.store(addr, value, host);
             }
-            changes.push(Change::Mem { addr, old: 0, new: value, width: width as u8 });
+            changes.push(Change::Mem {
+                addr,
+                old: 0,
+                new: value,
+                width: width as u8,
+            });
             // Device writes are watched like memory writes; memcheck is
             // exempt (device semantics, not memory).
             self.check_mem_watch(addr, width, true);
@@ -907,8 +1063,17 @@ impl Machine {
             }
             self.shadow.mark_init(addr, width);
         }
-        self.journal.push(Undo::Mem { addr, old, width: width as u8 });
-        changes.push(Change::Mem { addr, old, new: value, width: width as u8 });
+        self.journal.push(Undo::Mem {
+            addr,
+            old,
+            width: width as u8,
+        });
+        changes.push(Change::Mem {
+            addr,
+            old,
+            new: value,
+            width: width as u8,
+        });
         // The watch fires only once the store really landed (a failed store
         // — alignment, access violation — watches nothing).
         self.check_mem_watch(addr, width, true);
@@ -938,7 +1103,10 @@ pub(crate) mod testutil {
     use super::*;
 
     pub fn asm(src: &str) -> rvasm::AsmResult {
-        let files = vec![rvasm::InputFile { name: "t.s".into(), source: src.into() }];
+        let files = vec![rvasm::InputFile {
+            name: "t.s".into(),
+            source: src.into(),
+        }];
         rvasm::assemble(&files, &rvasm::AsmConfig::default())
     }
 
@@ -954,11 +1122,20 @@ pub(crate) mod testutil {
 
     /// Assemble and simulate in RV64 mode (RARS's 64-bit setting).
     pub fn machine64_with(src: &str, host: Box<dyn Host>) -> Machine {
-        let files = vec![rvasm::InputFile { name: "t.s".into(), source: src.into() }];
-        let acfg = rvasm::AsmConfig { rv64: true, ..rvasm::AsmConfig::default() };
+        let files = vec![rvasm::InputFile {
+            name: "t.s".into(),
+            source: src.into(),
+        }];
+        let acfg = rvasm::AsmConfig {
+            rv64: true,
+            ..rvasm::AsmConfig::default()
+        };
         let r = rvasm::assemble(&files, &acfg);
         assert!(!r.has_errors(), "diags: {:?}", r.diagnostics);
-        let mcfg = MachineConfig { rv64: true, ..MachineConfig::default() };
+        let mcfg = MachineConfig {
+            rv64: true,
+            ..MachineConfig::default()
+        };
         Machine::new(r.program.unwrap(), host, mcfg)
     }
 
@@ -1095,7 +1272,10 @@ ecall
     fn access_violation_errors() {
         let mut m = machine("    li t0, 8\n    lw a0, 0(t0)\n");
         let events = m.run(None);
-        assert!(matches!(events.last(), Some(Event::Halted(Halt::Error { .. }))));
+        assert!(matches!(
+            events.last(),
+            Some(Event::Halted(Halt::Error { .. }))
+        ));
     }
 
     #[test]
@@ -1177,11 +1357,13 @@ loop:
         // A single nop past the end of text drops off even with a handler
         // installed: only synchronous exceptions vector.
         let mut m = machine("    nop\n");
-        m.csrs.insert(csr::UTVEC, u64::from(m.program().text_base + 0x400));
+        m.csrs
+            .insert(csr::UTVEC, u64::from(m.program().text_base + 0x400));
         let events = m.run(None);
         assert_eq!(events.last(), Some(&Event::Halted(Halt::DroppedOff)));
         let mut m = machine("loop: j loop\n");
-        m.csrs.insert(csr::UTVEC, u64::from(m.program().text_base + 0x400));
+        m.csrs
+            .insert(csr::UTVEC, u64::from(m.program().text_base + 0x400));
         let events = m.run(Some(10));
         assert_eq!(events.last(), Some(&Event::Halted(Halt::Limit)));
     }
@@ -1240,7 +1422,11 @@ main:
         assert!(!r.has_errors(), "diags: {:?}", r.diagnostics);
         let var = r.program.as_ref().unwrap().symbols.get("var").unwrap().addr;
         assert_eq!(var, 0x1000_0000); // the data-segment base (extern region)
-        let mut m = Machine::new(r.program.unwrap(), Box::new(ScriptHost::default()), MachineConfig::default());
+        let mut m = Machine::new(
+            r.program.unwrap(),
+            Box::new(ScriptHost::default()),
+            MachineConfig::default(),
+        );
         // The reservation zero-mapped the region before any execution.
         let mut buf = [0u8; 4];
         m.peek_bytes(var, &mut buf).unwrap();
@@ -1277,7 +1463,11 @@ main:
         let b = p.symbols.get("b").unwrap().addr;
         assert_eq!(a, 0x1000_0000);
         assert_eq!(b, a + 4);
-        let mut m = Machine::new(p.clone(), Box::new(ScriptHost::default()), MachineConfig::default());
+        let mut m = Machine::new(
+            p.clone(),
+            Box::new(ScriptHost::default()),
+            MachineConfig::default(),
+        );
         m.run(None);
         assert_eq!(m.reg(10), 1);
         assert_eq!(m.reg(11), 2);
@@ -1294,12 +1484,18 @@ main:
             name: "t.s".into(),
             source: ".data\nv: .word 99\n.text\nlw a0, v\nli a7, 10\necall\n".into(),
         }];
-        let acfg = rvasm::AsmConfig { data_base: 0x0001_0000, ..rvasm::AsmConfig::default() };
+        let acfg = rvasm::AsmConfig {
+            data_base: 0x0001_0000,
+            ..rvasm::AsmConfig::default()
+        };
         let r = rvasm::assemble(&files, &acfg);
         assert!(!r.has_errors(), "diags: {:?}", r.diagnostics);
         let program = r.program.unwrap();
         assert_eq!(program.data.base, 0x0001_0000);
-        let cfg = MachineConfig { layout: MemLayout::compact_data_at_zero(), ..MachineConfig::default() };
+        let cfg = MachineConfig {
+            layout: MemLayout::compact_data_at_zero(),
+            ..MachineConfig::default()
+        };
         let mut m = Machine::new(program, Box::new(ScriptHost::default()), cfg);
         assert_eq!(m.layout().name(), "CompactDataAtZero");
         m.run(None);
@@ -1309,13 +1505,22 @@ main:
     #[test]
     fn compact_text_preset_fetches_from_address_zero() {
         // CompactTextAtZero: text at 0, data segment at the Default base.
-        let files = vec![rvasm::InputFile { name: "t.s".into(), source: "    li a0, 5\n    ecall\n".into() }];
-        let acfg = rvasm::AsmConfig { text_base: 0x0000_0000, ..rvasm::AsmConfig::default() };
+        let files = vec![rvasm::InputFile {
+            name: "t.s".into(),
+            source: "    li a0, 5\n    ecall\n".into(),
+        }];
+        let acfg = rvasm::AsmConfig {
+            text_base: 0x0000_0000,
+            ..rvasm::AsmConfig::default()
+        };
         let r = rvasm::assemble(&files, &acfg);
         assert!(!r.has_errors(), "diags: {:?}", r.diagnostics);
         let program = r.program.unwrap();
         assert_eq!(program.text_base, 0);
-        let cfg = MachineConfig { layout: MemLayout::compact_text_at_zero(), ..MachineConfig::default() };
+        let cfg = MachineConfig {
+            layout: MemLayout::compact_text_at_zero(),
+            ..MachineConfig::default()
+        };
         let mut m = Machine::new(program, Box::new(ScriptHost::default()), cfg);
         assert_eq!(m.layout().name(), "CompactTextAtZero");
         assert_eq!(m.pc(), 0);
@@ -1469,5 +1674,119 @@ main:
         assert_eq!(m.reg(5), 1_000_000_000_000_001); // store undone, reg kept
         assert!(m.backstep());
         assert_eq!(m.reg(5), 1_000_000_000_000_000);
+    }
+}
+
+#[cfg(test)]
+mod compressed_exec_tests {
+    use super::*;
+
+    fn asm_c(src: &str) -> rvasm::AsmResult {
+        let files = vec![rvasm::InputFile {
+            name: "c.s".into(),
+            source: src.into(),
+        }];
+        rvasm::assemble(
+            &files,
+            &rvasm::AsmConfig {
+                allow_compressed: true,
+                ..rvasm::AsmConfig::default()
+            },
+        )
+    }
+
+    fn machine_c(src: &str) -> Machine {
+        let r = asm_c(src);
+        assert!(!r.has_errors(), "diags: {:?}", r.diagnostics);
+        Machine::new(
+            r.program.unwrap(),
+            Box::new(ScriptHost::default()),
+            MachineConfig::default(),
+        )
+    }
+
+    #[test]
+    fn compressed_program_runs() {
+        let src = "\
+c.addi a0, 1
+li a1, 40
+c.add a0, a0, a1
+c.swsp a0, 4(sp)
+c.lwsp a1, 4(sp)
+c.mv a0, a1
+c.beqz a0, fail
+c.nop
+c.li a7, 1
+ecall
+c.li a7, 10
+ecall
+fail:
+li a0, -1
+li a7, 93
+ecall
+";
+        let mut m = machine_c(src);
+        m.run(None);
+        // a0 = 1 + 40, roundtripped through the sp-relative store/load pair;
+        // the fail branch would leave it at -1.
+        assert_eq!(m.exit_code(), Some(0));
+        assert_eq!(m.reg(10), 41);
+    }
+
+    #[test]
+    fn compressed_two_byte_alignment() {
+        // A compressed instruction sits at an address that is 2-byte aligned
+        // but not 4-byte aligned; the fetch must handle it.
+        let src = "\
+    c.nop
+    c.addi a0, 1
+    c.li a7, 10
+    ecall
+";
+        let mut m = machine_c(src);
+        // First statement at base, second at base+2 (odd word alignment).
+        m.step();
+        assert_eq!(m.pc(), m.program().text_base + 2);
+        m.run(None);
+        assert_eq!(m.reg(10), 1);
+        assert!(m.is_terminated());
+    }
+
+    #[test]
+    fn compressed_doubleword_sp_roundtrip() {
+        // RV64: c.sdsp/c.ldsp move a 64-bit value through the stack slot.
+        let src = "\
+li t0, 0x1234
+addi sp, sp, -16
+c.sdsp t0, 8(sp)
+c.ldsp t1, 8(sp)
+c.mv a0, t1
+c.li a7, 10
+ecall
+";
+        let files = vec![rvasm::InputFile {
+            name: "sd.s".into(),
+            source: src.into(),
+        }];
+        let r = rvasm::assemble(
+            &files,
+            &rvasm::AsmConfig {
+                allow_compressed: true,
+                rv64: true,
+                ..rvasm::AsmConfig::default()
+            },
+        );
+        assert!(!r.has_errors(), "{:?}", r.diagnostics);
+        let mut m = Machine::new(
+            r.program.unwrap(),
+            Box::new(ScriptHost::default()),
+            MachineConfig {
+                rv64: true,
+                ..MachineConfig::default()
+            },
+        );
+        m.run(None);
+        assert_eq!(m.reg(10), 0x1234);
+        assert_eq!(m.exit_code(), Some(0));
     }
 }
