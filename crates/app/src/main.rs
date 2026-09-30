@@ -80,6 +80,9 @@ struct Shared {
     rv64: RefCell<bool>,
     /// Memcheck: halt on reads of uninitialized memory (opt-in).
     memcheck: RefCell<bool>,
+    /// Calling-convention checker: pause when a return violates the
+    /// preserved-register and stack-pointer rules (opt-in).
+    check_cconv: RefCell<bool>,
 }
 
 /// Every widget the behavior code needs, kept by handle. wxDragon handles are
@@ -159,6 +162,7 @@ fn main() {
             memory_base: RefCell::new(0x1001_0000),
             rv64: RefCell::new(false),
             memcheck: RefCell::new(false),
+            check_cconv: RefCell::new(false),
         });
         let narrator = Rc::new(Narrator::new());
 
@@ -1055,6 +1059,7 @@ fn do_assemble(widgets: &Widgets, shared: &Shared, narrator: &Narrator, cmd_tx: 
                     Box::new(program),
                     *shared.rv64.borrow(),
                     *shared.memcheck.borrow(),
+                    *shared.check_cconv.borrow(),
                 ))
                 .ok();
         }
@@ -1240,12 +1245,23 @@ fn show_settings_dialog(frame: &Frame, shared: &Rc<Shared>) {
     memcheck.set_accessibility_description("Pause the program when it reads memory it never wrote");
     sizer.add(&memcheck, 0, SizerFlag::All, 4);
 
+    let cconv = CheckBox::builder(&panel)
+        .with_label("Check the calling convention on function returns")
+        .with_value(*shared.check_cconv.borrow())
+        .build();
+    cconv.set_accessibility_label("Calling convention checker");
+    cconv.set_accessibility_description(
+        "Pause when a function return changes the stack pointer or an s register from its value at the call",
+    );
+    sizer.add(&cconv, 0, SizerFlag::All, 4);
+
     let close_btn = Button::builder(&panel).with_label("Close").build();
     close_btn.set_accessibility_label("Close settings");
     let dlg = dialog;
     let choice = verbosity;
     let xlen_choice = xlen;
     let memcheck_box = memcheck;
+    let cconv_box = cconv;
     let sh = shared.clone();
     close_btn.on_click(move |_| {
         if let Some(sel) = choice.get_selection() {
@@ -1259,6 +1275,7 @@ fn show_settings_dialog(frame: &Frame, shared: &Rc<Shared>) {
             *sh.rv64.borrow_mut() = sel == 1;
         }
         *sh.memcheck.borrow_mut() = memcheck_box.get_value();
+        *sh.check_cconv.borrow_mut() = cconv_box.get_value();
         dlg.end_modal(ID_OK);
     });
     sizer.add(&close_btn, 0, SizerFlag::AlignCenterHorizontal | SizerFlag::All, 8);

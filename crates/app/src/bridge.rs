@@ -16,9 +16,9 @@ const RUN_CHUNK: u64 = 100_000;
 
 pub enum Cmd {
     /// Install a freshly assembled program (also resets the machine); the
-    /// flags select RV64 and memcheck and must match the assemble-time
-    /// choices.
-    Load(Box<Program>, bool, bool),
+    /// flags select RV64, memcheck, and the calling-convention checker and
+    /// must match the assemble-time choices.
+    Load(Box<Program>, bool, bool, bool),
     Run,
     Pause,
     Step,
@@ -140,7 +140,7 @@ pub fn start_sim_thread(cmds: Receiver<Cmd>, events: Sender<Evt>, input: InputCh
 
         if let Some(cmd) = cmd {
             match cmd {
-                Cmd::Load(program, rv64, memcheck) => {
+                Cmd::Load(program, rv64, memcheck, cconv) => {
                     let host = ChannelHost {
                         events: events.clone(),
                         input: input.clone(),
@@ -150,7 +150,12 @@ pub fn start_sim_thread(cmds: Receiver<Cmd>, events: Sender<Evt>, input: InputCh
                     let m = Machine::new(
                         *program,
                         Box::new(host),
-                        MachineConfig { rv64, memcheck, ..MachineConfig::default() },
+                        MachineConfig {
+                            rv64,
+                            memcheck,
+                            check_calling_convention: cconv,
+                            ..MachineConfig::default()
+                        },
                     );
                     let (pc, instret) = (m.pc(), m.instret());
                     send_state(&events, &m);
@@ -169,7 +174,8 @@ pub fn start_sim_thread(cmds: Receiver<Cmd>, events: Sender<Evt>, input: InputCh
                                     Halt::Breakpoint
                                     | Halt::Ebreak
                                     | Halt::Watchpoint { .. }
-                                    | Halt::Memcheck { .. },
+                                    | Halt::Memcheck { .. }
+                                    | Halt::CallingConvention { .. },
                                 ) => {
                                     if let Some(m) = machine.as_mut() {
                                         m.continue_after_stop();

@@ -2,6 +2,7 @@
 //! backstep journal. Owned exclusively by one driver thread; all UI contact
 //! flows through `Host` and returned events.
 
+mod cconv;
 mod exec;
 mod fp;
 mod host;
@@ -40,6 +41,11 @@ pub struct MachineConfig {
     /// uninitialized-read detector, see `watch`). Off by default; when off
     /// the only cost is one branch per load.
     pub memcheck: bool,
+    /// Calling-convention checker (Venus-inspired, see `cconv`): keep a call
+    /// stack of activation records and halt on any return that fails to
+    /// restore `$sp` or the s registers. Off by default; when off the cost
+    /// is zero.
+    pub check_calling_convention: bool,
 }
 
 /// Why the machine stopped producing instructions.
@@ -61,6 +67,11 @@ pub enum Halt {
     /// Memcheck caught a load touching uninitialized memory. Raised after
     /// the load retired; `continue_after_stop`/backstep resume from it.
     Memcheck { description: String },
+    /// The calling-convention checker caught a return that left `$sp` or an
+    /// s register different from what the call recorded. Raised after the
+    /// return retired; like a watchpoint this is a debugger pause —
+    /// `continue_after_stop`/backstep resume from it.
+    CallingConvention { description: String },
     /// Simulation error (bad address, unknown syscall, ...).
     Error { message: String },
     /// Caller-imposed instruction limit reached.
@@ -111,7 +122,7 @@ impl StepOutcome {
 
 /// One undo record. A `Boundary` marks where a statement's records start so
 /// backstep can undo a whole instruction atomically.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 enum Undo {
     Boundary,
     /// Marker that this statement retired an instruction, carrying the
@@ -137,6 +148,12 @@ enum Undo {
     HexKeys,
     /// `wfi` parked the hart; undo un-parks.
     Waiting { old: bool },
+    /// Calling-convention checker: a call pushed an activation record; undo
+    /// pops it so backstepping over a call rewinds the checker's stack.
+    CcPush,
+    /// Calling-convention checker: a return popped this record; undo pushes
+    /// it back so a violation halt, once backstepped, replays identically.
+    CcPop(Box<cconv::Frame>),
 }
 
 struct Journal {
@@ -211,6 +228,9 @@ pub struct Machine {
     pub(crate) next_watch_id: u32,
     /// Memcheck init shadow; empty (zero cost) unless `config.memcheck`.
     pub(crate) shadow: watch::InitShadow,
+    /// Calling-convention call stack of activation records; empty (zero
+    /// cost) unless `config.check_calling_convention`.
+    pub(crate) callstack: Vec<cconv::Frame>,
     /// Stop raised while the current instruction executed (watchpoint or
     /// memcheck): applied at the end of the step, after the instruction
     /// retired.
@@ -294,6 +314,7 @@ impl Machine {
             watchpoints: Vec::new(),
             next_watch_id: 0,
             shadow: watch::InitShadow::default(),
+            callstack: Vec::new(),
             pending_stop: None,
             active_pc: 0,
         };
@@ -638,6 +659,10 @@ impl Machine {
                 Undo::SoftwareIrq => self.software_pending = true,
                 Undo::HexKeys => self.mmio.keys_pending = true,
                 Undo::Waiting { old } => self.waiting = old,
+                Undo::CcPush => {
+                    self.callstack.pop();
+                }
+                Undo::CcPop(frame) => self.callstack.push(*frame),
                 Undo::Retired { .. } | Undo::Boundary => {}
             }
         }
@@ -667,8 +692,10 @@ impl Machine {
         self.load_program_image();
         // The shadow is rebuilt by load_program_image, so reset restores the
         // program-load init state too. Watchpoint registrations survive a
-        // reset, like breakpoints.
+        // reset, like breakpoints. The checker's call stack dies with the
+        // execution that built it: post-reset, no call has happened.
         self.shadow.clear();
+        self.callstack.clear();
         self.pending_stop = None;
         self.journal.records.clear();
         self.terminated = None;

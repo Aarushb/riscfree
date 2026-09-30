@@ -168,6 +168,9 @@ pub(crate) fn execute(m: &mut Machine, w: u32, pc_before: u32) -> ExecOutcome {
             let target = (pc_before as u64).wrapping_add(imm_j(w)) as u32;
             m.write_reg(rd(w), link, &mut changes);
             m.pc = target;
+            // Writing ra is the call signal (`j` is jal x0, never a call);
+            // the calling-convention checker snapshots the caller's state.
+            m.check_call_site(pc_before, opcode, rd(w));
         }
         0x67 => {
             // jalr
@@ -175,6 +178,8 @@ pub(crate) fn execute(m: &mut Machine, w: u32, pc_before: u32) -> ExecOutcome {
             let target = (m.regs[rs1(w)].wrapping_add(imm_i(w)) as u32) & !1;
             m.write_reg(rd(w), link, &mut changes);
             m.pc = target;
+            // jalr ra targets a call; jalr x0 returns (`ret`, `jr`, `tail`).
+            m.check_call_site(pc_before, opcode, rd(w));
         }
         0x63 => {
             // branches: compares run at register width (32- or 64-bit).

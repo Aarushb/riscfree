@@ -119,6 +119,7 @@ pub fn halted(v: Verbosity, halt: &Halt, instret: u64, location: Option<&str>) -
         Halt::Limit => format!("Stopped at the step limit. {count}."),
         Halt::Watchpoint { description } => format!("{description}."),
         Halt::Memcheck { description } => format!("{description}."),
+        Halt::CallingConvention { description } => format!("{description}."),
     };
     if v == Verbosity::Verbose {
         if let Some(loc) = location {

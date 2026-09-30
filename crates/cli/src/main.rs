@@ -193,7 +193,8 @@ fn print_halt(halt: &Halt, machine: &Machine) {
             eprintln!("simulation error: {message}");
             std::process::exit(3);
         }
-        Halt::Watchpoint { description } | Halt::Memcheck { description } => {
+        Halt::Watchpoint { description } | Halt::Memcheck { description }
+        | Halt::CallingConvention { description } => {
             eprintln!("simulation: {description}");
         }
         Halt::Limit => eprintln!("simulation: reached the step limit"),
