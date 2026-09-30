@@ -14,6 +14,30 @@ use std::time::Duration;
 /// never waits perceptibly, large enough that channel traffic is negligible.
 const RUN_CHUNK: u64 = 100_000;
 
+/// Wraps the event channel's sender and wakes the wx idle loop after every
+/// post. With this, the GUI's idle handler only runs when there is actually
+/// something to drain — an always-requesting idle pump pins the main thread
+/// in a sleep cycle and starves screen-reader UIA queries, which surface as
+/// multi-second announcement lag.
+#[derive(Clone)]
+pub struct EventSender {
+    inner: Sender<Evt>,
+}
+
+impl EventSender {
+    pub fn new(inner: Sender<Evt>) -> Self {
+        EventSender { inner }
+    }
+
+    pub fn send(&self, evt: Evt) -> std::result::Result<(), std::sync::mpsc::SendError<Evt>> {
+        let result = self.inner.send(evt);
+        // Wake the idle loop even on a failed send: a failed send means the
+        // UI is gone, and a spurious wake is harmless.
+        wxdragon::wake_up_idle();
+        result
+    }
+}
+
 pub enum Cmd {
     /// Install a freshly assembled program (also resets the machine); the
     /// flags select RV64, memcheck, and the calling-convention checker and
@@ -102,7 +126,7 @@ pub struct StateSnapshot {
 pub type InputChannel = Arc<Mutex<Receiver<String>>>;
 
 struct ChannelHost {
-    events: Sender<Evt>,
+    events: EventSender,
     input: InputChannel,
     pending: Option<String>,
     pending_pos: usize,
@@ -155,7 +179,7 @@ impl rvm::Host for ChannelHost {
     }
 }
 
-pub fn start_sim_thread(cmds: Receiver<Cmd>, events: Sender<Evt>, input: InputChannel) {
+pub fn start_sim_thread(cmds: Receiver<Cmd>, events: EventSender, input: InputChannel) {
     let mut machine: Option<Machine> = None;
     let mut running = false;
 
@@ -348,7 +372,7 @@ pub fn start_sim_thread(cmds: Receiver<Cmd>, events: Sender<Evt>, input: InputCh
     }
 }
 
-fn step_once(m: &mut Machine, events: &Sender<Evt>) {
+fn step_once(m: &mut Machine, events: &EventSender) {
     let pc_before = m.pc();
     let statement = m.program().statement_at(pc_before).cloned();
     let outcome = m.step();
@@ -379,7 +403,7 @@ fn step_once(m: &mut Machine, events: &Sender<Evt>) {
     }
 }
 
-fn send_state(events: &Sender<Evt>, m: &Machine) {
+fn send_state(events: &EventSender, m: &Machine) {
     let mut regs = [0u64; 32];
     let mut fregs = [0u64; 32];
     for (i, r) in regs.iter_mut().enumerate() {

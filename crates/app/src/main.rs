@@ -193,6 +193,9 @@ fn main() {
         // Simulation thread and channels.
         let (cmd_tx, cmd_rx) = std::sync::mpsc::channel::<Cmd>();
         let (evt_tx, evt_rx) = std::sync::mpsc::channel::<Evt>();
+        // Every sim event wakes the idle loop, so the idle handler below
+        // only runs while there is something to drain.
+        let evt_tx = bridge::EventSender::new(evt_tx);
         let (input_tx, input_rx) = std::sync::mpsc::channel::<String>();
         let input: InputChannel = std::sync::Arc::new(std::sync::Mutex::new(input_rx));
         let memory_listeners: tools::MemoryListeners = Rc::new(std::cell::RefCell::new(Vec::new()));
@@ -414,24 +417,28 @@ fn main() {
             let counts_listeners = counts_listeners.clone();
             frame.on_idle(move |idle| {
                 if let WindowEventData::Idle(idle) = idle {
-                    idle.request_more(true);
-                }
-                std::thread::sleep(std::time::Duration::from_millis(5));
-                while let Ok(evt) = evt_rx.try_recv() {
-                    match evt {
-                        Evt::Counts { counts, tag } => {
-                            for (listener_tag, listener) in counts_listeners.borrow().iter() {
-                                if *listener_tag == tag {
-                                    listener(&counts);
+                    // Stay hot only while events keep arriving; each post
+                    // also calls wake_up_idle from the sim thread, so this
+                    // handler runs exactly when there is something to do.
+                    let mut got_any = false;
+                    while let Ok(evt) = evt_rx.try_recv() {
+                        got_any = true;
+                        match evt {
+                            Evt::Counts { counts, tag } => {
+                                for (listener_tag, listener) in counts_listeners.borrow().iter() {
+                                    if *listener_tag == tag {
+                                        listener(&counts);
+                                    }
+                                }
+                            }
+                            other => {
+                                if !tools::route_memory_event(&listeners, &other) {
+                                    handle_sim_event(&w, &sh, &nar, &tx, other);
                                 }
                             }
                         }
-                        other => {
-                            if !tools::route_memory_event(&listeners, &other) {
-                                handle_sim_event(&w, &sh, &nar, &tx, other);
-                            }
-                        }
                     }
+                    idle.request_more(got_any);
                 }
             });
         }
@@ -916,7 +923,6 @@ fn build_editor(parent: &Panel) -> StyledTextCtrl {
     EditorKeys(&editor).on_key_down(move |data| {
         if let WindowEventData::Keyboard(kb) = &data {
             if kb.get_key_code() == Some(WXK_TAB) {
-                let editor = editor.clone();
                 if kb.control_down() {
                     let pos = editor.get_current_pos();
                     editor.insert_text(pos, "\t");
