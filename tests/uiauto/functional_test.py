@@ -11,6 +11,7 @@ from pathlib import Path
 
 import ctypes
 import comtypes.client
+import win32api
 import win32gui
 import win32process
 import win32con
@@ -102,7 +103,83 @@ def main() -> int:
             raise RuntimeError("main window never appeared")
         step("main window found")
 
+        from comtypes.gen.UIAutomationClient import IUIAutomation
+        iuia = comtypes.client.CreateObject(
+            "{ff48dba4-60ef-4201-aa87-54103eef594e}", interface=IUIAutomation
+        )
+
+        # Editor tab navigation: Tab must move focus out of the editor and
+        # must not insert a tab character (the focus-trap fix). The key is
+        # posted to the Scintilla child itself, as a real keystroke would be.
         time.sleep(1.0)
+        scintillas = []
+        win32gui.EnumChildWindows(
+            hwnd, lambda h, _param: scintillas.append(h), None
+        )
+        scintillas = [
+            h for h in scintillas if win32gui.GetClassName(h) == "Scintilla"
+        ]
+        tab_ok = False
+        if scintillas:
+            # The Scintilla child sits inside a wx wrapper window; the wx
+            # event chain (and thus the tab handler) lives on the wrapper.
+            wrapper = win32gui.GetParent(scintillas[0])
+
+            def attached() -> "object":
+                tid_app, _pid = win32process.GetWindowThreadProcessId(hwnd)
+                tid_cur = win32api.GetCurrentThreadId()
+                win32process.AttachThreadInput(tid_cur, tid_app, True)
+                return tid_app, tid_cur
+
+            def detach(tid_app: int, tid_cur: int) -> None:
+                win32process.AttachThreadInput(tid_cur, tid_app, False)
+
+            def app_focus() -> int:
+                tid_app, tid_cur = attached()
+                try:
+                    return win32gui.GetFocus() or 0
+                finally:
+                    detach(tid_app, tid_cur)
+
+            def set_app_focus(target: int) -> None:
+                tid_app, tid_cur = attached()
+                try:
+                    win32gui.SetFocus(target)
+                finally:
+                    detach(tid_app, tid_cur)
+
+            set_app_focus(wrapper)
+            started_on_editor = app_focus() == wrapper
+            root = iuia.ElementFromHandle(hwnd)
+            els = root.FindAll(TreeScope_Descendants, iuia.CreateTrueCondition())
+            before_value = None
+            for i in range(els.Length):
+                e = els.GetElement(i)
+                if prop(e, UIA_ClassNamePropertyId) == "Scintilla":
+                    before_value = prop(e, UIA_ValueValuePropertyId)
+                    break
+            post_key(wrapper, 0x09)  # Tab
+            time.sleep(0.8)
+            focus_after = app_focus()
+            els = root.FindAll(TreeScope_Descendants, iuia.CreateTrueCondition())
+            after_value = None
+            for i in range(els.Length):
+                e = els.GetElement(i)
+                if prop(e, UIA_ClassNamePropertyId) == "Scintilla":
+                    after_value = prop(e, UIA_ValueValuePropertyId)
+                    break
+            left = focus_after not in (0, wrapper, scintillas[0])
+            tab_ok = started_on_editor and left and before_value == after_value
+            step(
+                f"tab from editor: started_on_editor={started_on_editor}, "
+                f"focus left={left}, text unchanged="
+                f"{before_value == after_value} "
+                f"({'PASS' if tab_ok else 'FAIL'})"
+            )
+        else:
+            step("no Scintilla child found for tab check")
+
+        time.sleep(0.3)
         post_key(hwnd, 0x72)  # F3: assemble
         step("sent F3 (assemble)")
         time.sleep(2.0)
@@ -112,10 +189,6 @@ def main() -> int:
 
         # Read the status bar via UIA FindAll (server-side walk; recursive
         # client walks hang on this app, as probe_app.py documents).
-        from comtypes.gen.UIAutomationClient import IUIAutomation
-        iuia = comtypes.client.CreateObject(
-            "{ff48dba4-60ef-4201-aa87-54103eef594e}", interface=IUIAutomation
-        )
         found: list = []
         collect_statuses(iuia, hwnd, found)
         step(f"walked tree: {len(found)} status-related elements")
@@ -123,7 +196,7 @@ def main() -> int:
             print(f"    name={name!r} value={value!r} class={classname!r}")
 
         joined = " | ".join(f"{n} {v}" for n, v, _ in found)
-        ok = "executed" in joined and "12" in joined
+        ok = tab_ok and "executed" in joined and "12" in joined
 
         # Breakpoint flow: reset (F12), Ctrl+D toggles on the row at the
         # current PC (row 0 after reset), F5 stops there immediately.
