@@ -1575,7 +1575,7 @@ fn show_shortcuts_dialog(frame: &Frame) {
     let panel = Panel::builder(&dialog).build();
     let sizer = BoxSizer::builder(Orientation::Vertical).build();
 
-    let shortcuts: [(&str, &str); 14] = [
+    let shortcuts: [(&str, &str); 16] = [
         ("Assemble", "F3"),
         ("Run program", "F5"),
         ("Pause run", "F9"),
@@ -1585,6 +1585,8 @@ fn show_shortcuts_dialog(frame: &Frame) {
         ("Reset program", "F12"),
         ("Toggle breakpoint", "Ctrl+D"),
         ("Toggle memory watchpoint", "Ctrl+W"),
+        ("Move focus out of the editor", "Tab or Shift+Tab"),
+        ("Insert a tab character in the editor", "Ctrl+Tab"),
         ("New file", "Ctrl+N"),
         ("Open file", "Ctrl+O"),
         ("Save file", "Ctrl+S"),
