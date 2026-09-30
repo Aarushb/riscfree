@@ -887,6 +887,21 @@ fn build_menu_bar() -> MenuBar {
         .build()
 }
 
+/// Key handling bound on the editor's own event handler. StyledTextCtrl does
+/// not implement wxDragon's WindowEvents, so this newtype bridges it: Tab and
+/// Shift+Tab move focus (the standard Windows multiline-edit convention) and
+/// Ctrl+Tab inserts the tab character. Without this, Scintilla consumes Tab
+/// as an indent command and keyboard focus is trapped in the editor.
+struct EditorKeys<'a>(&'a StyledTextCtrl);
+
+impl WxEvtHandler for EditorKeys<'_> {
+    unsafe fn get_event_handler_ptr(&self) -> *mut wxdragon::ffi::wxd_EvtHandler_t {
+        self.0.get_event_handler_ptr()
+    }
+}
+
+impl WindowEvents for EditorKeys<'_> {}
+
 fn build_editor(parent: &Panel) -> StyledTextCtrl {
     let editor = StyledTextCtrl::builder(parent).build();
     editor.set_text(SAMPLE_RISCV);
@@ -897,6 +912,24 @@ fn build_editor(parent: &Panel) -> StyledTextCtrl {
     editor.set_accessibility_description("RISC-V assembly source editor");
     #[cfg(target_os = "windows")]
     editor.set_accessibility_role(AccRole::Document);
+
+    EditorKeys(&editor).on_key_down(move |data| {
+        if let WindowEventData::Keyboard(kb) = &data {
+            if kb.get_key_code() == Some(WXK_TAB) {
+                let editor = editor.clone();
+                if kb.control_down() {
+                    let pos = editor.get_current_pos();
+                    editor.insert_text(pos, "\t");
+                } else {
+                    editor.navigate(!kb.shift_down());
+                }
+                // Handled here: do not skip, or Scintilla inserts a tab too.
+                return;
+            }
+        }
+        data.skip(true);
+    });
+
     editor
 }
 
