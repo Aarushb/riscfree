@@ -233,7 +233,11 @@ impl crate::Machine {
     /// The segment bits last written to a seven-segment display (0 or 1;
     /// other indices read 0) for the tool window to render.
     pub fn display_segments(&self, display: u32) -> u8 {
-        self.mmio.seg_displays.get(display as usize).copied().unwrap_or(0)
+        self.mmio
+            .seg_displays
+            .get(display as usize)
+            .copied()
+            .unwrap_or(0)
     }
 
     /// Simulate a hex-keypad press: the scan code (e.g. 0x11 for row 1,
@@ -249,8 +253,8 @@ impl crate::Machine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ScriptHost;
     use crate::csr;
+    use crate::ScriptHost;
 
     /// Hand-encoded uret (the assembler has no uret mnemonic).
     const URET: u32 = 0x0020_0073;
@@ -273,7 +277,7 @@ mod tests {
         let mut host = ScriptHost::default();
         mmio.store(0xffff_000c, u64::from(b'A'), &mut host);
         mmio.store(0xffff_000c, 12, &mut host); // form feed: forwarded raw
-        // Cursor command: byte 7, X = 10, Y = 5 — no output produced.
+                                                // Cursor command: byte 7, X = 10, Y = 5 — no output produced.
         mmio.store(0xffff_000c, 7 | (10 << 20) | (5 << 8), &mut host);
         assert_eq!(host.take_output(), "A\u{c}");
     }
@@ -408,7 +412,7 @@ mod tests {
         assert_eq!(m.display_segments(0), 0x3f);
         assert_eq!(m.display_segments(1), 0x06);
         assert_eq!(m.display_segments(2), 0); // only two displays exist
-        // ...and the tool-side push lands where a program would read it.
+                                              // ...and the tool-side push lands where a program would read it.
         m.set_display_segments(1, 0x5b);
         let mut host = ScriptHost::default();
         assert_eq!(m.mmio.load(0xffff_0011, 1, &mut host), 0x5b);
@@ -448,10 +452,19 @@ uret_slot:
         }
         m.press_hex_key(0x11); // row 1, column 1
         let events = m.run(Some(200));
-        assert_eq!(events.last(), Some(&crate::Event::Halted(crate::Halt::Limit)));
+        assert_eq!(
+            events.last(),
+            Some(&crate::Event::Halted(crate::Halt::Limit))
+        );
         // The trap carried the HEX_KEYS cause and the handler read the code.
-        assert_eq!(m.reg(9), crate::irq::INTERRUPT_BIT | u64::from(crate::irq::HEX_KEYS));
-        assert_eq!(m.csr(csr::UCAUSE), crate::irq::INTERRUPT_BIT | u64::from(crate::irq::HEX_KEYS));
+        assert_eq!(
+            m.reg(9),
+            crate::irq::INTERRUPT_BIT | u64::from(crate::irq::HEX_KEYS)
+        );
+        assert_eq!(
+            m.csr(csr::UCAUSE),
+            crate::irq::INTERRUPT_BIT | u64::from(crate::irq::HEX_KEYS)
+        );
         assert_eq!(m.reg(10), 0x11);
         // Consumed at delivery: the spin loop does not re-trap.
         assert!(!m.mmio.keys_pending);
@@ -467,7 +480,7 @@ uret_slot:
         let mut m = crate::testutil::machine(src);
         m.run(None);
         m.press_hex_key(0x88); // row 4, column 4
-        // No request latched, so nothing can deliver.
+                               // No request latched, so nothing can deliver.
         assert!(!m.mmio.keys_pending);
         assert_eq!(m.deliverable_interrupt(), None);
         // The scan code is still readable at the result register.
@@ -486,7 +499,10 @@ uret_slot:
         let before = m.pc();
         m.step(); // the nop retires, then the delivery point traps
         assert_eq!(m.pc(), handler + 4 * crate::irq::HEX_KEYS);
-        assert_eq!(m.csr(csr::UCAUSE), crate::irq::INTERRUPT_BIT | u64::from(crate::irq::HEX_KEYS));
+        assert_eq!(
+            m.csr(csr::UCAUSE),
+            crate::irq::INTERRUPT_BIT | u64::from(crate::irq::HEX_KEYS)
+        );
         assert_eq!(m.csr(csr::UEPC), u64::from(before + 4));
         // Backstep re-raises the request, so stepping traps again.
         assert!(m.backstep());

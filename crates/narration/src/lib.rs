@@ -18,8 +18,9 @@ pub enum Verbosity {
 }
 
 const ABI: &[&str] = &[
-    "zero", "ra", "sp", "gp", "tp", "t0", "t1", "t2", "s0", "s1", "a0", "a1", "a2", "a3", "a4", "a5",
-    "a6", "a7", "s2", "s3", "s4", "s5", "s6", "s7", "s8", "s9", "s10", "s11", "t3", "t4", "t5", "t6",
+    "zero", "ra", "sp", "gp", "tp", "t0", "t1", "t2", "s0", "s1", "a0", "a1", "a2", "a3", "a4",
+    "a5", "a6", "a7", "s2", "s3", "s4", "s5", "s6", "s7", "s8", "s9", "s10", "s11", "t3", "t4",
+    "t5", "t6",
 ];
 
 fn reg_name(index: usize) -> &'static str {
@@ -45,7 +46,10 @@ pub fn assemble_done(
         }
         Some(text)
     } else {
-        let mut text = format!("Assembly failed. {error_count} error{}.", if error_count == 1 { "" } else { "s" });
+        let mut text = format!(
+            "Assembly failed. {error_count} error{}.",
+            if error_count == 1 { "" } else { "s" }
+        );
         if v == Verbosity::Verbose {
             if let Some(err) = first_error {
                 text = format!("{text} First: {err}");
@@ -64,7 +68,10 @@ pub fn step_done(v: Verbosity, statement_text: &str, changes: &[Change]) -> Opti
         return None;
     }
     let mut parts: Vec<String> = Vec::new();
-    let reg_changes: Vec<&Change> = changes.iter().filter(|c| matches!(c, Change::Reg { .. })).collect();
+    let reg_changes: Vec<&Change> = changes
+        .iter()
+        .filter(|c| matches!(c, Change::Reg { .. }))
+        .collect();
     for c in reg_changes.iter().take(3) {
         if let Change::Reg { index, new, .. } = c {
             parts.push(format!("{} is {}", reg_name(*index), format_value(*new)));
@@ -75,8 +82,14 @@ pub fn step_done(v: Verbosity, statement_text: &str, changes: &[Change]) -> Opti
     }
     if v == Verbosity::Verbose {
         for c in changes.iter().filter(|c| matches!(c, Change::Mem { .. })) {
-            if let Change::Mem { addr, new, width, .. } = c {
-                parts.push(format!("wrote {width} bytes at 0x{addr:08x}, now {}", format_value(*new)));
+            if let Change::Mem {
+                addr, new, width, ..
+            } = c
+            {
+                parts.push(format!(
+                    "wrote {width} bytes at 0x{addr:08x}, now {}",
+                    format_value(*new)
+                ));
             }
         }
         for c in changes.iter().filter(|c| matches!(c, Change::Pc { .. })) {
@@ -137,7 +150,10 @@ pub fn output_arrived(v: Verbosity, new_lines: usize) -> Option<String> {
     match v {
         Verbosity::Off => None,
         Verbosity::Brief => Some("New program output.".to_string()),
-        Verbosity::Verbose => Some(format!("New program output: {new_lines} new line{}.", if new_lines == 1 { "" } else { "s" })),
+        Verbosity::Verbose => Some(format!(
+            "New program output: {new_lines} new line{}.",
+            if new_lines == 1 { "" } else { "s" }
+        )),
     }
 }
 
@@ -177,7 +193,14 @@ mod tests {
 
     #[test]
     fn step_brief_names_statement_and_registers() {
-        let changes = vec![Change::Reg { index: 10, old: 0, new: 5 }, Change::Pc { old: 0, new: 4 }];
+        let changes = vec![
+            Change::Reg {
+                index: 10,
+                old: 0,
+                new: 5,
+            },
+            Change::Pc { old: 0, new: 4 },
+        ];
         assert_eq!(
             step_done(Verbosity::Brief, "li a0, 5", &changes).as_deref(),
             Some("li a0, 5. a0 is 5")
@@ -187,9 +210,21 @@ mod tests {
     #[test]
     fn step_verbose_adds_memory_and_pc() {
         let changes = vec![
-            Change::Reg { index: 10, old: 0, new: 5 },
-            Change::Mem { addr: 0x7fff_eff0, old: 0, new: 5, width: 4 },
-            Change::Pc { old: 0, new: 0x0040_0010 },
+            Change::Reg {
+                index: 10,
+                old: 0,
+                new: 5,
+            },
+            Change::Mem {
+                addr: 0x7fff_eff0,
+                old: 0,
+                new: 5,
+                width: 4,
+            },
+            Change::Pc {
+                old: 0,
+                new: 0x0040_0010,
+            },
         ];
         assert_eq!(
             step_done(Verbosity::Verbose, "sw a0, 0(sp)", &changes).as_deref(),
@@ -200,7 +235,11 @@ mod tests {
     #[test]
     fn step_caps_three_registers() {
         let changes: Vec<Change> = (10..16)
-            .map(|i| Change::Reg { index: i, old: 0, new: i as u64 })
+            .map(|i| Change::Reg {
+                index: i,
+                old: 0,
+                new: i as u64,
+            })
             .collect();
         let text = step_done(Verbosity::Brief, "many writes", &changes).unwrap();
         assert!(text.contains("and more registers changed"), "{text}");
@@ -209,7 +248,10 @@ mod tests {
 
     #[test]
     fn step_without_register_changes_speaks_statement() {
-        assert_eq!(step_done(Verbosity::Brief, "nop", &[]).as_deref(), Some("nop"));
+        assert_eq!(
+            step_done(Verbosity::Brief, "nop", &[]).as_deref(),
+            Some("nop")
+        );
     }
 
     #[test]
@@ -231,20 +273,35 @@ mod tests {
             Some("Stopped at breakpoint, line 22.")
         );
         assert_eq!(
-            halted(Verbosity::Verbose, &Halt::Exit { code: 0 }, 5, Some("line 9")).as_deref(),
+            halted(
+                Verbosity::Verbose,
+                &Halt::Exit { code: 0 },
+                5,
+                Some("line 9")
+            )
+            .as_deref(),
             Some("Program finished. 5 instructions executed. At line 9.")
         );
-        assert_eq!(halted(Verbosity::Off, &Halt::Exit { code: 0 }, 5, None), None);
+        assert_eq!(
+            halted(Verbosity::Off, &Halt::Exit { code: 0 }, 5, None),
+            None
+        );
     }
 
     #[test]
     fn output_summaries() {
-        assert_eq!(output_arrived(Verbosity::Brief, 12).as_deref(), Some("New program output."));
+        assert_eq!(
+            output_arrived(Verbosity::Brief, 12).as_deref(),
+            Some("New program output.")
+        );
         assert_eq!(
             output_arrived(Verbosity::Verbose, 12).as_deref(),
             Some("New program output: 12 new lines.")
         );
-        assert_eq!(output_arrived(Verbosity::Verbose, 1).as_deref(), Some("New program output: 1 new line."));
+        assert_eq!(
+            output_arrived(Verbosity::Verbose, 1).as_deref(),
+            Some("New program output: 1 new line.")
+        );
         assert_eq!(output_arrived(Verbosity::Off, 12), None);
     }
 }

@@ -85,14 +85,38 @@ pub struct InstructionInfo {
 }
 
 impl InstructionInfo {
-    const fn new(name: &'static str, format: Format, opcode: u32, funct3: u32, funct7: u32) -> Self {
-        InstructionInfo { name, format, kind: InstrKind::Int, opcode, funct3, funct7, rs2_fixed: 0, rv64_only: false }
+    const fn new(
+        name: &'static str,
+        format: Format,
+        opcode: u32,
+        funct3: u32,
+        funct7: u32,
+    ) -> Self {
+        InstructionInfo {
+            name,
+            format,
+            kind: InstrKind::Int,
+            opcode,
+            funct3,
+            funct7,
+            rs2_fixed: 0,
+            rv64_only: false,
+        }
     }
 
     /// RV64-only integer instruction: same layout as `new`, flagged so the
     /// assembler can gate it to 64-bit mode.
-    const fn new64(name: &'static str, format: Format, opcode: u32, funct3: u32, funct7: u32) -> Self {
-        InstructionInfo { rv64_only: true, ..Self::new(name, format, opcode, funct3, funct7) }
+    const fn new64(
+        name: &'static str,
+        format: Format,
+        opcode: u32,
+        funct3: u32,
+        funct7: u32,
+    ) -> Self {
+        InstructionInfo {
+            rv64_only: true,
+            ..Self::new(name, format, opcode, funct3, funct7)
+        }
     }
 
     /// FP instruction: `funct3` is either the operation selector or the
@@ -108,7 +132,16 @@ impl InstructionInfo {
         funct7: u32,
         rs2_fixed: u8,
     ) -> Self {
-        InstructionInfo { name, format, kind, opcode, funct3, funct7, rs2_fixed, rv64_only: false }
+        InstructionInfo {
+            name,
+            format,
+            kind,
+            opcode,
+            funct3,
+            funct7,
+            rs2_fixed,
+            rv64_only: false,
+        }
     }
 
     /// RV64-only FP instruction (64-bit int↔float conversions, double
@@ -122,7 +155,10 @@ impl InstructionInfo {
         funct7: u32,
         rs2_fixed: u8,
     ) -> Self {
-        InstructionInfo { rv64_only: true, ..Self::new_fp(name, format, kind, opcode, funct3, funct7, rs2_fixed) }
+        InstructionInfo {
+            rv64_only: true,
+            ..Self::new_fp(name, format, kind, opcode, funct3, funct7, rs2_fixed)
+        }
     }
 }
 
@@ -354,7 +390,16 @@ pub fn decode_fields(word: u32) -> DecodedFields {
         JAL => (decode::imm_for(word), "J"),
         _ => (0, "R"),
     };
-    DecodedFields { opcode, rd, funct3, rs1, rs2, funct7, immediate, format }
+    DecodedFields {
+        opcode,
+        rd,
+        funct3,
+        rs1,
+        rs2,
+        funct7,
+        immediate,
+        format,
+    }
 }
 
 fn enc_r(info: &InstructionInfo, rd: u32, rs1: u32, rs2: u32) -> u32 {
@@ -427,7 +472,12 @@ pub fn encode(info: &InstructionInfo, ops: &[u32]) -> u32 {
         Format::R => enc_r(info, ops[0], ops[1], ops[2]),
         // Single-source FP forms reuse the I-type layout: the fixed
         // funct7+rs2 pair fills imm[11:0] exactly as slli's shift field does.
-        Format::R2 => enc_i(info, ops[0], ops[1], ((info.funct7 & 0x7f) << 5) | (info.rs2_fixed & 0x1f) as u32),
+        Format::R2 => enc_i(
+            info,
+            ops[0],
+            ops[1],
+            ((info.funct7 & 0x7f) << 5) | (info.rs2_fixed & 0x1f) as u32,
+        ),
         Format::R4 => enc_r4(info, ops[0], ops[1], ops[2], ops[3]),
         // ecall/ebreak are identified by their immediate field (0 or 1);
         // fence's canonical RARS encoding sets the IORW bits.

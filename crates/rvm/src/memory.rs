@@ -1,7 +1,7 @@
 //! Sparse paged memory with RARS's segment layout.
 //!
 //! Addresses are 32-bit even in RV64 mode by design: RARS's memory map
-//! (text at 0x00400000, static data at 0x10010000, stack top at 0x7fffeffc,
+//! (text at 0x00400000, static data at 0x10010000, stack top at 0x7fffeff8,
 //! MMIO at 0xffff0000) lives entirely in the low 4 GB in both of its modes,
 //! so widening the address path would change nothing a teaching program can
 //! reach. Effective addresses truncate to u32; only the *data* width grows
@@ -32,7 +32,7 @@ impl Default for MemLayout {
             text_len: 4 * 1024 * 1024,
             data_base: 0x1000_0000,
             heap_base: 0x1004_0000,
-            stack_top: 0x7fff_fffc,
+            stack_top: 0x7fff_eff8,
             stack_limit: 0x7ff0_0000,
             kernel_base: 0x8000_0000,
             mmio_base: 0xffff_0000,
@@ -58,7 +58,11 @@ impl MemLayout {
     /// 0x10000, heap = data_base + 0x40000), so the matching assembler
     /// config is `AsmConfig { data_base: 0x0001_0000, .. }`.
     pub fn compact_data_at_zero() -> Self {
-        MemLayout { data_base: 0x0000_0000, heap_base: 0x0004_0000, ..MemLayout::default() }
+        MemLayout {
+            data_base: 0x0000_0000,
+            heap_base: 0x0004_0000,
+            ..MemLayout::default()
+        }
     }
 
     /// RARS's `CompactTextAtZero` setting: text at address 0 and the data
@@ -66,7 +70,10 @@ impl MemLayout {
     /// 0x10010000). Course programs that assume a zero-based text segment
     /// need this so fetches and breakpoint addresses line up.
     pub fn compact_text_at_zero() -> Self {
-        MemLayout { text_base: 0x0000_0000, ..MemLayout::default() }
+        MemLayout {
+            text_base: 0x0000_0000,
+            ..MemLayout::default()
+        }
     }
 }
 
@@ -81,9 +88,15 @@ pub enum MemError {
 impl std::fmt::Display for MemError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            MemError::AccessViolation { addr } => write!(f, "address 0x{addr:08x} is outside the mapped memory segments"),
+            MemError::AccessViolation { addr } => write!(
+                f,
+                "address 0x{addr:08x} is outside the mapped memory segments"
+            ),
             MemError::Unaligned { addr, width } => {
-                write!(f, "address 0x{addr:08x} is not aligned to a {width}-byte access")
+                write!(
+                    f,
+                    "address 0x{addr:08x} is not aligned to a {width}-byte access"
+                )
             }
         }
     }
@@ -102,7 +115,9 @@ impl Memory {
     }
 
     fn page_mut(&mut self, base: u32) -> &mut [u8; PAGE_SIZE] {
-        self.pages.entry(base).or_insert_with(|| Box::new([0; PAGE_SIZE]))
+        self.pages
+            .entry(base)
+            .or_insert_with(|| Box::new([0; PAGE_SIZE]))
     }
 
     pub fn write_bytes(&mut self, mut addr: u32, bytes: &[u8]) {
@@ -192,7 +207,7 @@ mod tests {
         assert_eq!(l.text_len, 4 * 1024 * 1024);
         assert_eq!(l.data_base, 0x1000_0000);
         assert_eq!(l.heap_base, 0x1004_0000);
-        assert_eq!(l.stack_top, 0x7fff_fffc);
+        assert_eq!(l.stack_top, 0x7fff_eff8);
         assert_eq!(l.mmio_base, 0xffff_0000);
     }
 
@@ -222,7 +237,10 @@ mod tests {
 
     #[test]
     fn hand_edited_bases_report_custom() {
-        let l = MemLayout { text_base: 0x0030_0000, ..MemLayout::default() };
+        let l = MemLayout {
+            text_base: 0x0030_0000,
+            ..MemLayout::default()
+        };
         assert_eq!(l.name(), "Custom");
     }
 }

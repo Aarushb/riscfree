@@ -53,21 +53,36 @@ impl BitmapTool {
             l
         };
         let base_label = make_label("Base address (hex):");
-        settings.add(&base_label, 0, SizerFlag::AlignCenterVertical | SizerFlag::All, 2);
+        settings.add(
+            &base_label,
+            0,
+            SizerFlag::AlignCenterVertical | SizerFlag::All,
+            2,
+        );
         let base_input = TextCtrl::builder(&panel).build();
         base_input.set_value("10010000");
         base_input.set_accessibility_label("Bitmap base address");
         settings.add(&base_input, 1, SizerFlag::Expand | SizerFlag::All, 2);
 
         let width_label = make_label("Width:");
-        settings.add(&width_label, 0, SizerFlag::AlignCenterVertical | SizerFlag::All, 2);
+        settings.add(
+            &width_label,
+            0,
+            SizerFlag::AlignCenterVertical | SizerFlag::All,
+            2,
+        );
         let width_input = TextCtrl::builder(&panel).build();
         width_input.set_value("16");
         width_input.set_accessibility_label("Bitmap width in pixels");
         settings.add(&width_input, 0, SizerFlag::All, 2);
 
         let height_label = make_label("Height:");
-        settings.add(&height_label, 0, SizerFlag::AlignCenterVertical | SizerFlag::All, 2);
+        settings.add(
+            &height_label,
+            0,
+            SizerFlag::AlignCenterVertical | SizerFlag::All,
+            2,
+        );
         let height_input = TextCtrl::builder(&panel).build();
         height_input.set_value("16");
         height_input.set_accessibility_label("Bitmap height in pixels");
@@ -157,13 +172,27 @@ impl BitmapTool {
                 16,
             )
             .unwrap_or(0x1001_0000);
-            let width = width_for_apply.get_value().trim().parse().unwrap_or(16).clamp(1, 256);
-            let height = height_for_apply.get_value().trim().parse().unwrap_or(16).clamp(1, 256);
+            let width = width_for_apply
+                .get_value()
+                .trim()
+                .parse()
+                .unwrap_or(16)
+                .clamp(1, 256);
+            let height = height_for_apply
+                .get_value()
+                .trim()
+                .parse()
+                .unwrap_or(16)
+                .clamp(1, 256);
             state_for_apply.base.set(base);
             state_for_apply.width.set(width);
             state_for_apply.height.set(height);
             tx_for_apply
-                .send(Cmd::ReadMemory { addr: base, len: width * height * 4, tag })
+                .send(Cmd::ReadMemory {
+                    addr: base,
+                    len: width * height * 4,
+                    tag,
+                })
                 .ok();
             request_for_apply();
         });

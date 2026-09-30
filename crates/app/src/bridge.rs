@@ -25,15 +25,26 @@ pub enum Cmd {
     Backstep,
     Reset,
     /// Toggle a breakpoint on a text-segment address.
-    SetBreakpoint { addr: u32, on: bool },
+    SetBreakpoint {
+        addr: u32,
+        on: bool,
+    },
     /// Read len bytes of memory for a data view; `tag` routes the response.
-    ReadMemory { addr: u32, len: u32, tag: u32 },
+    ReadMemory {
+        addr: u32,
+        len: u32,
+        tag: u32,
+    },
     /// Press a Digital Lab Sim hex keypad key (scan code, e.g. 0x11).
     PressHexKey(u8),
     /// Toggle a write watchpoint covering one word at addr.
-    ToggleMemWatchpoint { addr: u32 },
+    ToggleMemWatchpoint {
+        addr: u32,
+    },
     /// Request per-opcode execution counts; `tag` routes the response.
-    GetCounts { tag: u32 },
+    GetCounts {
+        tag: u32,
+    },
     /// Arm the instruction-count timer (interrupt cause 0x10).
     ArmTimer(u64),
     /// Disarm the instruction-count timer.
@@ -44,17 +55,37 @@ pub enum Evt {
     /// Program console output (print syscalls and the MMIO transmitter).
     Output(String),
     /// Response to ReadMemory: the bytes at the requested base.
-    Memory { base: u32, bytes: Vec<u8>, tag: u32 },
+    Memory {
+        base: u32,
+        bytes: Vec<u8>,
+        tag: u32,
+    },
     /// Response to GetCounts: (opcode, count) pairs sorted by opcode.
-    Counts { counts: Vec<(u32, u64)>, tag: u32 },
+    Counts {
+        counts: Vec<(u32, u64)>,
+        tag: u32,
+    },
     /// Full register snapshot; sent after loads, run chunks, and halts.
     /// Boxed because 32 registers dwarf the other variants.
     State(Box<StateSnapshot>),
     /// One executed instruction in step mode, with its changes for narration.
-    Stepped { text: String, line: u32, changes: Vec<Change>, pc: u32, instret: u64 },
-    Halted { halt: Halt, pc: u32, instret: u64 },
+    Stepped {
+        text: String,
+        line: u32,
+        changes: Vec<Change>,
+        pc: u32,
+        instret: u64,
+    },
+    Halted {
+        halt: Halt,
+        pc: u32,
+        instret: u64,
+    },
     /// The machine loaded a program and is back at its starting state.
-    Loaded { pc: u32, instret: u64 },
+    Loaded {
+        pc: u32,
+        instret: u64,
+    },
 }
 
 pub struct StateSnapshot {
@@ -87,13 +118,21 @@ impl rvm::Host for ChannelHost {
     }
 
     fn read_char(&mut self) -> Option<u8> {
-        if self.pending.as_ref().is_none_or(|s| self.pending_pos >= s.len()) {
+        if self
+            .pending
+            .as_ref()
+            .is_none_or(|s| self.pending_pos >= s.len())
+        {
             let line = self.read_line()?;
             self.pending = Some(line);
             self.pending_pos = 0;
         }
         let text = self.pending.as_ref()?;
-        let byte = text.as_bytes().get(self.pending_pos).copied().unwrap_or(b'\n');
+        let byte = text
+            .as_bytes()
+            .get(self.pending_pos)
+            .copied()
+            .unwrap_or(b'\n');
         self.pending_pos += 1;
         Some(byte)
     }
@@ -224,7 +263,13 @@ pub fn start_sim_thread(cmds: Receiver<Cmd>, events: Sender<Evt>, input: InputCh
                         // Unmapped ranges read as zeros, matching memory
                         // semantics; no error for view refreshes.
                         m.peek_bytes(addr, &mut bytes).ok();
-                        events.send(Evt::Memory { base: addr, bytes, tag }).ok();
+                        events
+                            .send(Evt::Memory {
+                                base: addr,
+                                bytes,
+                                tag,
+                            })
+                            .ok();
                     }
                 }
                 Cmd::PressHexKey(scan) => {
@@ -238,9 +283,9 @@ pub fn start_sim_thread(cmds: Receiver<Cmd>, events: Sender<Evt>, input: InputCh
                             .watchpoints()
                             .into_iter()
                             .filter(|(_, spec)| match spec {
-                                rvm::WatchSpec::Mem { addr: base, len, .. } => {
-                                    addr >= *base && addr < base + len
-                                }
+                                rvm::WatchSpec::Mem {
+                                    addr: base, len, ..
+                                } => addr >= *base && addr < base + len,
                                 _ => false,
                             })
                             .map(|(id, _)| id)
@@ -290,7 +335,13 @@ pub fn start_sim_thread(cmds: Receiver<Cmd>, events: Sender<Evt>, input: InputCh
             }
             send_state(&events, m);
             if let Some(halt) = halted_evt {
-                events.send(Evt::Halted { halt, pc: m.pc(), instret: m.instret() }).ok();
+                events
+                    .send(Evt::Halted {
+                        halt,
+                        pc: m.pc(),
+                        instret: m.instret(),
+                    })
+                    .ok();
                 running = false;
             }
         }
@@ -317,7 +368,13 @@ fn step_once(m: &mut Machine, events: &Sender<Evt>) {
     }
     for evt in outcome.events {
         if let rvm::Event::Halted(halt) = evt {
-            events.send(Evt::Halted { halt, pc: m.pc(), instret: m.instret() }).ok();
+            events
+                .send(Evt::Halted {
+                    halt,
+                    pc: m.pc(),
+                    instret: m.instret(),
+                })
+                .ok();
         }
     }
 }

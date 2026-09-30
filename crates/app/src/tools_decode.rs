@@ -15,7 +15,10 @@ fn reg_name(index: u32) -> String {
         "a5", "a6", "a7", "s2", "s3", "s4", "s5", "s6", "s7", "s8", "s9", "s10", "s11", "t3", "t4",
         "t5", "t6",
     ];
-    format!("x{index} ({})", ABI.get(index as usize).copied().unwrap_or("?"))
+    format!(
+        "x{index} ({})",
+        ABI.get(index as usize).copied().unwrap_or("?")
+    )
 }
 
 fn describe(fields: &DecodedFields) -> String {

@@ -24,7 +24,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::mpsc::Sender;
 
-use crate::bridge::{Cmd, Evt, InputChannel, start_sim_thread};
+use crate::bridge::{start_sim_thread, Cmd, Evt, InputChannel};
 
 // Menu and control ids.
 const ID_NEW: Id = 1001;
@@ -112,7 +112,9 @@ struct Narrator {
 
 impl Narrator {
     fn new() -> Self {
-        Narrator { speaker: RefCell::new(None) }
+        Narrator {
+            speaker: RefCell::new(None),
+        }
     }
 
     fn with_speaker(&self, f: impl FnOnce(&mut dyn speech::Speaker)) {
@@ -242,8 +244,15 @@ fn main() {
             .build();
         right_splitter.set_accessibility_label("Right side panes");
 
-        let (register_notebook, register_list, fp_list, program_list, memory_list, memory_addr, memory_go) =
-            build_state_views(&right_splitter);
+        let (
+            register_notebook,
+            register_list,
+            fp_list,
+            program_list,
+            memory_list,
+            memory_addr,
+            memory_go,
+        ) = build_state_views(&right_splitter);
         let (bottom_notebook, io_output, io_input, send_input, messages) =
             build_bottom_views(&right_splitter);
 
@@ -320,12 +329,23 @@ fn main() {
             let sh = shared.clone();
             let tx = cmd_tx.clone();
             memory_go.on_click(move |_| {
-                let text = w.memory_addr.get_value().trim().trim_start_matches("0x").to_string();
+                let text = w
+                    .memory_addr
+                    .get_value()
+                    .trim()
+                    .trim_start_matches("0x")
+                    .to_string();
                 if let Ok(addr) = u32::from_str_radix(&text, 16) {
                     *sh.memory_base.borrow_mut() = addr;
-                    tx.send(Cmd::ReadMemory { addr, len: 512, tag: 0 }).ok();
+                    tx.send(Cmd::ReadMemory {
+                        addr,
+                        len: 512,
+                        tag: 0,
+                    })
+                    .ok();
                 } else {
-                    w.status_bar.set_status_text("Memory address must be hexadecimal", 0);
+                    w.status_bar
+                        .set_status_text("Memory address must be hexadecimal", 0);
                 }
             });
         }
@@ -578,7 +598,11 @@ fn toggle_selected_watchpoint(w: &Widgets, cmd_tx: &Sender<bridge::Cmd>) {
             // The Breakpoint column doubles as the marker column; a row can
             // hold both a breakpoint and a watchpoint marker, so keep them
             // distinguishable.
-            row[3] = if on { "watch".to_string() } else { String::new() };
+            row[3] = if on {
+                "watch".to_string()
+            } else {
+                String::new()
+            };
         }
     });
     w.program_list.refresh_items(index as i64, index as i64);
@@ -607,14 +631,26 @@ fn handle_sim_event(
             w.io_output.append_text(&text);
         }
         Evt::State(snapshot) => {
-            let bridge::StateSnapshot { regs, fregs, displays, pc, instret } = *snapshot;
+            let bridge::StateSnapshot {
+                regs,
+                fregs,
+                displays,
+                pc,
+                instret,
+            } = *snapshot;
             DISPLAYS.with(|d| *d.borrow_mut() = displays);
             refresh_registers(w, &regs);
             refresh_fp_registers(w, &fregs);
             mark_program_pc(w, pc);
-            w.status_bar.set_status_text(&format!("pc 0x{pc:08x}, {instret} executed"), 1);
+            w.status_bar
+                .set_status_text(&format!("pc 0x{pc:08x}, {instret} executed"), 1);
             let base = *shared.memory_base.borrow();
-            tx.send(Cmd::ReadMemory { addr: base, len: 512, tag: 0 }).ok();
+            tx.send(Cmd::ReadMemory {
+                addr: base,
+                len: 512,
+                tag: 0,
+            })
+            .ok();
         }
         Evt::Memory { base, bytes, tag } => {
             // Tag 0 is the Memory tab; other tags route to their tools in
@@ -631,9 +667,22 @@ fn handle_sim_event(
         Evt::Counts { .. } => {
             // Routed to the Instruction Counter tool by the pump.
         }
-        Evt::Stepped { text, line, changes, pc, instret } => {
-            w.status_bar.set_status_text(&format!("line {line}, pc 0x{pc:08x}, {instret} executed"), 1);
-            narrator.speak(narration::step_done(*shared.verbosity.borrow(), &text, &changes));
+        Evt::Stepped {
+            text,
+            line,
+            changes,
+            pc,
+            instret,
+        } => {
+            w.status_bar.set_status_text(
+                &format!("line {line}, pc 0x{pc:08x}, {instret} executed"),
+                1,
+            );
+            narrator.speak(narration::step_done(
+                *shared.verbosity.borrow(),
+                &text,
+                &changes,
+            ));
         }
         Evt::Halted { halt, pc, instret } => {
             let location = shared
@@ -644,18 +693,33 @@ fn handle_sim_event(
                 .map(|s| format!("line {}", s.source.line));
             match &halt {
                 Halt::Breakpoint | Halt::Ebreak => {
-                    w.status_bar.set_status_text(&format!("Stopped, {}", location.as_deref().unwrap_or("pc outside program")), 0);
+                    w.status_bar.set_status_text(
+                        &format!(
+                            "Stopped, {}",
+                            location.as_deref().unwrap_or("pc outside program")
+                        ),
+                        0,
+                    );
                 }
                 Halt::Exit { code } => {
-                    w.status_bar.set_status_text(&format!("Program finished with code {code}"), 0);
+                    w.status_bar
+                        .set_status_text(&format!("Program finished with code {code}"), 0);
                 }
                 _ => {}
             }
-            narrator.speak(narration::halted(*shared.verbosity.borrow(), &halt, instret, location.as_deref()));
+            narrator.speak(narration::halted(
+                *shared.verbosity.borrow(),
+                &halt,
+                instret,
+                location.as_deref(),
+            ));
         }
         Evt::Loaded { pc, instret } => {
             refresh_registers_zeroed(w);
-            w.status_bar.set_status_text(&format!("Program loaded, pc 0x{pc:08x}, {instret} executed"), 0);
+            w.status_bar.set_status_text(
+                &format!("Program loaded, pc 0x{pc:08x}, {instret} executed"),
+                0,
+            );
         }
     }
 }
@@ -711,8 +775,9 @@ thread_local! {
 }
 
 const ABI: &[&str] = &[
-    "zero", "ra", "sp", "gp", "tp", "t0", "t1", "t2", "s0", "s1", "a0", "a1", "a2", "a3", "a4", "a5",
-    "a6", "a7", "s2", "s3", "s4", "s5", "s6", "s7", "s8", "s9", "s10", "s11", "t3", "t4", "t5", "t6",
+    "zero", "ra", "sp", "gp", "tp", "t0", "t1", "t2", "s0", "s1", "a0", "a1", "a2", "a3", "a4",
+    "a5", "a6", "a7", "s2", "s3", "s4", "s5", "s6", "s7", "s8", "s9", "s10", "s11", "t3", "t4",
+    "t5", "t6",
 ];
 
 fn reg_name(index: usize) -> &'static str {
@@ -737,7 +802,11 @@ fn build_menu_bar() -> MenuBar {
         .append_item(ID_SAVE, "&Save\tCtrl+S", "Save the current source file")
         .append_separator()
         .append_item(ID_SETTINGS, "S&ettings...", "Open the settings dialog")
-        .append_item(ID_RECONNECT_SPEECH, "&Reconnect screen reader speech", "Reconnect the speech bridge after starting a screen reader")
+        .append_item(
+            ID_RECONNECT_SPEECH,
+            "&Reconnect screen reader speech",
+            "Reconnect the speech bridge after starting a screen reader",
+        )
         .append_separator()
         .append_item(ID_EXIT, "E&xit\tAlt+F4", "Exit AsAccess")
         .build();
@@ -745,7 +814,11 @@ fn build_menu_bar() -> MenuBar {
     // F-keys follow RARS so course muscle memory keeps working:
     // F3 assemble, F5 run, F7 step, F8 backstep, F9 pause, F11 stop, F12 reset.
     let run_menu = Menu::builder()
-        .append_item(ID_RUN_ASSEMBLE, "&Assemble\tF3", "Assemble the current source file")
+        .append_item(
+            ID_RUN_ASSEMBLE,
+            "&Assemble\tF3",
+            "Assemble the current source file",
+        )
         .append_item(ID_RUN_RUN, "&Run\tF5", "Run the assembled program")
         .append_item(ID_RUN_PAUSE, "Paus&e\tF9", "Pause the running program")
         .append_separator()
@@ -753,20 +826,52 @@ fn build_menu_bar() -> MenuBar {
         .append_item(ID_RUN_BACKSTEP, "&Backstep\tF8", "Undo one instruction")
         .append_separator()
         .append_item(ID_RUN_STOP, "Sto&p\tF11", "Stop the running program")
-        .append_item(ID_RUN_RESET, "R&eset\tF12", "Reset the program to its initial state")
+        .append_item(
+            ID_RUN_RESET,
+            "R&eset\tF12",
+            "Reset the program to its initial state",
+        )
         .build();
 
     let tools_menu = Menu::builder()
-        .append_item(ID_TOOL_BITMAP, "&Bitmap Display", "Watch memory as a pixel grid, with a textual view of every row")
-        .append_item(ID_TOOL_FLOAT, "Float &Representation", "Convert between raw bits and float values")
-        .append_item(ID_TOOL_LAB, "&Digital Lab Sim", "Seven segment displays and a hex keypad your program controls")
-        .append_item(ID_TOOL_COUNTER, "Instruction &Counter", "Executed instruction counts grouped by opcode")
-        .append_item(ID_TOOL_TIMER, "&Timer Tool", "Arm periodic timer interrupts for handler coursework")
-        .append_item(ID_TOOL_DECODE, "Instruction &Decode", "Break an instruction word into its fields")
+        .append_item(
+            ID_TOOL_BITMAP,
+            "&Bitmap Display",
+            "Watch memory as a pixel grid, with a textual view of every row",
+        )
+        .append_item(
+            ID_TOOL_FLOAT,
+            "Float &Representation",
+            "Convert between raw bits and float values",
+        )
+        .append_item(
+            ID_TOOL_LAB,
+            "&Digital Lab Sim",
+            "Seven segment displays and a hex keypad your program controls",
+        )
+        .append_item(
+            ID_TOOL_COUNTER,
+            "Instruction &Counter",
+            "Executed instruction counts grouped by opcode",
+        )
+        .append_item(
+            ID_TOOL_TIMER,
+            "&Timer Tool",
+            "Arm periodic timer interrupts for handler coursework",
+        )
+        .append_item(
+            ID_TOOL_DECODE,
+            "Instruction &Decode",
+            "Break an instruction word into its fields",
+        )
         .build();
 
     let help_menu = Menu::builder()
-        .append_item(ID_SHORTCUTS, "&Keyboard Shortcuts\tF1", "Show keyboard shortcuts")
+        .append_item(
+            ID_SHORTCUTS,
+            "&Keyboard Shortcuts\tF1",
+            "Show keyboard shortcuts",
+        )
         .append_separator()
         .append_item(ID_ABOUT, "&About AsAccess", "About this application")
         .build();
@@ -792,7 +897,17 @@ fn build_editor(parent: &Panel) -> StyledTextCtrl {
     editor
 }
 
-fn build_state_views(parent: &SplitterWindow) -> (Notebook, ListCtrl, ListCtrl, ListCtrl, ListCtrl, TextCtrl, Button) {
+fn build_state_views(
+    parent: &SplitterWindow,
+) -> (
+    Notebook,
+    ListCtrl,
+    ListCtrl,
+    ListCtrl,
+    ListCtrl,
+    TextCtrl,
+    Button,
+) {
     let notebook = Notebook::builder(parent).build();
     notebook.set_accessibility_label("State views");
     #[cfg(target_os = "windows")]
@@ -868,8 +983,15 @@ fn build_state_views(parent: &SplitterWindow) -> (Notebook, ListCtrl, ListCtrl, 
     let mem_sizer = BoxSizer::builder(Orientation::Vertical).build();
 
     let addr_row = BoxSizer::builder(Orientation::Horizontal).build();
-    let addr_label = StaticText::builder(&mem_panel).with_label("Address (hex):").build();
-    addr_row.add(&addr_label, 0, SizerFlag::AlignCenterVertical | SizerFlag::All, 2);
+    let addr_label = StaticText::builder(&mem_panel)
+        .with_label("Address (hex):")
+        .build();
+    addr_row.add(
+        &addr_label,
+        0,
+        SizerFlag::AlignCenterVertical | SizerFlag::All,
+        2,
+    );
     let mem_addr = TextCtrl::builder(&mem_panel).build();
     mem_addr.set_value("10010000");
     mem_addr.set_accessibility_label("Memory view address");
@@ -897,7 +1019,8 @@ fn build_state_views(parent: &SplitterWindow) -> (Notebook, ListCtrl, ListCtrl, 
         })
     }));
     mem_list.set_accessibility_label("Memory bytes");
-    mem_list.set_accessibility_description("Memory contents, sixteen bytes per row with ASCII text");
+    mem_list
+        .set_accessibility_description("Memory contents, sixteen bytes per row with ASCII text");
     #[cfg(target_os = "windows")]
     mem_list.set_accessibility_role(AccRole::List);
     mem_sizer.add(&mem_list, 1, SizerFlag::Expand | SizerFlag::All, 2);
@@ -937,7 +1060,9 @@ fn build_state_views(parent: &SplitterWindow) -> (Notebook, ListCtrl, ListCtrl, 
     fp_panel.set_sizer(fp_sizer, true);
     notebook.add_page(&fp_panel, "Floating Point", false, None);
 
-    (notebook, list, fp_list, prog_list, mem_list, mem_addr, mem_go)
+    (
+        notebook, list, fp_list, prog_list, mem_list, mem_addr, mem_go,
+    )
 }
 
 /// The bottom notebook: Run I/O console plus the assembler messages list.
@@ -953,7 +1078,9 @@ fn build_bottom_views(parent: &SplitterWindow) -> (Notebook, TextCtrl, TextCtrl,
     io_panel.set_accessibility_label("Run I O pane");
     let sizer = BoxSizer::builder(Orientation::Vertical).build();
 
-    let io_label = StaticText::builder(&io_panel).with_label("Program output (read only)").build();
+    let io_label = StaticText::builder(&io_panel)
+        .with_label("Program output (read only)")
+        .build();
     sizer.add(&io_label, 0, SizerFlag::All, 2);
 
     let io_output = TextCtrl::builder(&io_panel)
@@ -966,8 +1093,15 @@ fn build_bottom_views(parent: &SplitterWindow) -> (Notebook, TextCtrl, TextCtrl,
     sizer.add(&io_output, 1, SizerFlag::Expand | SizerFlag::All, 2);
 
     let input_row = BoxSizer::builder(Orientation::Horizontal).build();
-    let input_label = StaticText::builder(&io_panel).with_label("Program input:").build();
-    input_row.add(&input_label, 0, SizerFlag::AlignCenterVertical | SizerFlag::All, 2);
+    let input_label = StaticText::builder(&io_panel)
+        .with_label("Program input:")
+        .build();
+    input_row.add(
+        &input_label,
+        0,
+        SizerFlag::AlignCenterVertical | SizerFlag::All,
+        2,
+    );
 
     let io_input = TextCtrl::builder(&io_panel).build();
     io_input.set_accessibility_label("Program input");
@@ -1012,31 +1146,56 @@ fn do_assemble(widgets: &Widgets, shared: &Shared, narrator: &Narrator, cmd_tx: 
         .program_path
         .borrow()
         .as_ref()
-        .and_then(|p| std::path::Path::new(p).file_name().map(|f| f.to_string_lossy().into_owned()))
+        .and_then(|p| {
+            std::path::Path::new(p)
+                .file_name()
+                .map(|f| f.to_string_lossy().into_owned())
+        })
         .unwrap_or_else(|| "main.s".to_string());
     let files = vec![rvasm::InputFile { name, source: text }];
     let result = rvasm::assemble(
         &files,
-        &rvasm::AsmConfig { rv64: *shared.rv64.borrow(), ..rvasm::AsmConfig::default() },
+        &rvasm::AsmConfig {
+            rv64: *shared.rv64.borrow(),
+            ..rvasm::AsmConfig::default()
+        },
     );
 
     widgets.messages.delete_all_items();
-    *shared.diagnostic_spans.borrow_mut() =
-        result.diagnostics.iter().map(|d| d.pos).collect();
+    *shared.diagnostic_spans.borrow_mut() = result.diagnostics.iter().map(|d| d.pos).collect();
     for (i, d) in result.diagnostics.iter().enumerate() {
         let severity = if d.is_error() { "error" } else { "warning" };
         let idx = widgets.messages.insert_item(i as i64, severity, None);
-        let where_text = format!("{}:{}:{}", files[d.pos.file].name, d.pos.line, d.pos.col + 1);
-        widgets.messages.set_item_text_by_column(idx as i64, 1, &where_text);
-        widgets.messages.set_item_text_by_column(idx as i64, 2, &d.message);
+        let where_text = format!(
+            "{}:{}:{}",
+            files[d.pos.file].name,
+            d.pos.line,
+            d.pos.col + 1
+        );
+        widgets
+            .messages
+            .set_item_text_by_column(idx as i64, 1, &where_text);
+        widgets
+            .messages
+            .set_item_text_by_column(idx as i64, 2, &d.message);
     }
 
     let first_error = result.diagnostics.iter().find(|d| d.is_error()).map(|d| {
-        format!("{}:{}:{}: {}", files[d.pos.file].name, d.pos.line, d.pos.col + 1, d.message)
+        format!(
+            "{}:{}:{}: {}",
+            files[d.pos.file].name,
+            d.pos.line,
+            d.pos.col + 1,
+            d.message
+        )
     });
     let error_count = result.diagnostics.iter().filter(|d| d.is_error()).count();
     let ok = !result.has_errors();
-    let instructions = result.program.as_ref().map(|p| p.statements.len()).unwrap_or(0);
+    let instructions = result
+        .program
+        .as_ref()
+        .map(|p| p.statements.len())
+        .unwrap_or(0);
     narrator.speak(narration::assemble_done(
         *shared.verbosity.borrow(),
         ok,
@@ -1049,11 +1208,19 @@ fn do_assemble(widgets: &Widgets, shared: &Shared, narrator: &Narrator, cmd_tx: 
         if let Some(program) = result.program {
             *shared.assembled.borrow_mut() = Some(program.clone());
             load_program_rows(&program);
-            widgets.program_list.set_item_count(program.statements.len() as i64);
-            widgets.program_list.refresh_items(0, program.statements.len() as i64 - 1);
             widgets
-                .status_bar
-                .set_status_text(&format!("Assembled, {} instructions. Ready to run.", program.statements.len()), 0);
+                .program_list
+                .set_item_count(program.statements.len() as i64);
+            widgets
+                .program_list
+                .refresh_items(0, program.statements.len() as i64 - 1);
+            widgets.status_bar.set_status_text(
+                &format!(
+                    "Assembled, {} instructions. Ready to run.",
+                    program.statements.len()
+                ),
+                0,
+            );
             cmd_tx
                 .send(Cmd::Load(
                     Box::new(program),
@@ -1064,7 +1231,9 @@ fn do_assemble(widgets: &Widgets, shared: &Shared, narrator: &Narrator, cmd_tx: 
                 .ok();
         }
     } else {
-        widgets.status_bar.set_status_text("Assembly failed; see Assembler Messages", 0);
+        widgets
+            .status_bar
+            .set_status_text("Assembly failed; see Assembler Messages", 0);
     }
 }
 
@@ -1108,7 +1277,9 @@ fn bind_menu_events(
                                 *sh.program_path.borrow_mut() = Some(path.clone());
                                 w.status_bar.set_status_text(&format!("Opened {path}"), 0);
                             }
-                            Err(e) => w.status_bar.set_status_text(&format!("Cannot open {path}: {e}"), 0),
+                            Err(e) => w
+                                .status_bar
+                                .set_status_text(&format!("Cannot open {path}: {e}"), 0),
                         }
                     }
                 }
@@ -1121,9 +1292,15 @@ fn bind_menu_events(
                     None => {
                         let dialog = FileDialog::builder(&fr)
                             .with_message("Save assembly source")
-                            .with_wildcard("Assembly sources (*.s;*.asm)|*.s;*.asm|All files (*.*)|*.*")
+                            .with_wildcard(
+                                "Assembly sources (*.s;*.asm)|*.s;*.asm|All files (*.*)|*.*",
+                            )
                             .build();
-                        let chosen = if dialog.show_modal() == ID_OK { dialog.get_path() } else { None };
+                        let chosen = if dialog.show_modal() == ID_OK {
+                            dialog.get_path()
+                        } else {
+                            None
+                        };
                         dialog.destroy();
                         match chosen {
                             Some(p) => p,
@@ -1137,7 +1314,9 @@ fn bind_menu_events(
                         *sh.program_path.borrow_mut() = Some(path.clone());
                         w.status_bar.set_status_text(&format!("Saved {path}"), 0);
                     }
-                    Err(e) => w.status_bar.set_status_text(&format!("Cannot save {path}: {e}"), 0),
+                    Err(e) => w
+                        .status_bar
+                        .set_status_text(&format!("Cannot save {path}: {e}"), 0),
                 }
             }
             ID_SETTINGS => show_settings_dialog(&fr, &sh),
@@ -1147,12 +1326,24 @@ fn bind_menu_events(
             }
             ID_EXIT => fr.close(true),
             ID_RUN_ASSEMBLE => do_assemble(&w, &sh, &nar, &tx),
-            ID_RUN_RUN => { tx.send(Cmd::Run).ok(); }
-            ID_RUN_STEP => { tx.send(Cmd::Step).ok(); }
-            ID_RUN_BACKSTEP => { tx.send(Cmd::Backstep).ok(); }
-            ID_RUN_PAUSE => { tx.send(Cmd::Pause).ok(); }
-            ID_RUN_STOP => { tx.send(Cmd::Pause).ok(); }
-            ID_RUN_RESET => { tx.send(Cmd::Reset).ok(); }
+            ID_RUN_RUN => {
+                tx.send(Cmd::Run).ok();
+            }
+            ID_RUN_STEP => {
+                tx.send(Cmd::Step).ok();
+            }
+            ID_RUN_BACKSTEP => {
+                tx.send(Cmd::Backstep).ok();
+            }
+            ID_RUN_PAUSE => {
+                tx.send(Cmd::Pause).ok();
+            }
+            ID_RUN_STOP => {
+                tx.send(Cmd::Pause).ok();
+            }
+            ID_RUN_RESET => {
+                tx.send(Cmd::Reset).ok();
+            }
             ID_RUN_TOGGLE_BREAK => toggle_selected_breakpoint(&w, &tx),
             ID_RUN_TOGGLE_WATCH => toggle_selected_watchpoint(&w, &tx),
             ID_TOOL_FLOAT => {
@@ -1165,7 +1356,12 @@ fn bind_menu_events(
                 tools_lab::DigitalLabSim::open(tx2, listeners, tag);
                 // One read to paint the initial display state; the listener
                 // also refreshes on every later tagged read.
-                tx.send(Cmd::ReadMemory { addr: 0xffff_0000, len: 0x16, tag }).ok();
+                tx.send(Cmd::ReadMemory {
+                    addr: 0xffff_0000,
+                    len: 0x16,
+                    tag,
+                })
+                .ok();
             }
             ID_TOOL_COUNTER => {
                 let tag = tools::next_tag(&listener_tags);
@@ -1189,7 +1385,9 @@ fn bind_menu_events(
                 tools::BitmapTool::open(tx2, listeners, tag, wake);
             }
             ID_SHORTCUTS => show_shortcuts_dialog(&fr),
-            ID_ABOUT => w.status_bar.set_status_text("AsAccess: an accessibility-first RISC-V IDE", 0),
+            ID_ABOUT => w
+                .status_bar
+                .set_status_text("AsAccess: an accessibility-first RISC-V IDE", 0),
             _ => {}
         }
     });
@@ -1207,9 +1405,15 @@ fn show_settings_dialog(frame: &Frame, shared: &Rc<Shared>) {
     let panel = Panel::builder(&dialog).build();
     let sizer = BoxSizer::builder(Orientation::Vertical).build();
 
-    let verbosity_label = StaticText::builder(&panel).with_label("Announcement verbosity:").build();
+    let verbosity_label = StaticText::builder(&panel)
+        .with_label("Announcement verbosity:")
+        .build();
     let verbosity = Choice::builder(&panel)
-        .with_choices(vec!["Off".to_string(), "Brief".to_string(), "Verbose".to_string()])
+        .with_choices(vec![
+            "Off".to_string(),
+            "Brief".to_string(),
+            "Verbose".to_string(),
+        ])
         .with_selection(Some(match *shared.verbosity.borrow() {
             Verbosity::Off => 0,
             Verbosity::Brief => 1,
@@ -1219,11 +1423,18 @@ fn show_settings_dialog(frame: &Frame, shared: &Rc<Shared>) {
     verbosity.set_accessibility_label("Announcement verbosity");
     verbosity.set_accessibility_description("How much narration detail the screen reader speaks");
     let verbosity_row = BoxSizer::builder(Orientation::Horizontal).build();
-    verbosity_row.add(&verbosity_label, 0, SizerFlag::AlignCenterVertical | SizerFlag::All, 4);
+    verbosity_row.add(
+        &verbosity_label,
+        0,
+        SizerFlag::AlignCenterVertical | SizerFlag::All,
+        4,
+    );
     verbosity_row.add(&verbosity, 1, SizerFlag::Expand | SizerFlag::All, 4);
     sizer.add_sizer(&verbosity_row, 0, SizerFlag::Expand, 0);
 
-    let xlen_label = StaticText::builder(&panel).with_label("Instruction set:").build();
+    let xlen_label = StaticText::builder(&panel)
+        .with_label("Instruction set:")
+        .build();
     let xlen = Choice::builder(&panel)
         .with_choices(vec!["RV32 (default)".to_string(), "RV64".to_string()])
         .with_selection(Some(if *shared.rv64.borrow() { 1 } else { 0 }))
@@ -1233,7 +1444,12 @@ fn show_settings_dialog(frame: &Frame, shared: &Rc<Shared>) {
         "RV32 or RV64; applies the next time you assemble. RV64 stack operations should keep eight byte alignment",
     );
     let xlen_row = BoxSizer::builder(Orientation::Horizontal).build();
-    xlen_row.add(&xlen_label, 0, SizerFlag::AlignCenterVertical | SizerFlag::All, 4);
+    xlen_row.add(
+        &xlen_label,
+        0,
+        SizerFlag::AlignCenterVertical | SizerFlag::All,
+        4,
+    );
     xlen_row.add(&xlen, 1, SizerFlag::Expand | SizerFlag::All, 4);
     sizer.add_sizer(&xlen_row, 0, SizerFlag::Expand, 0);
 
@@ -1278,7 +1494,12 @@ fn show_settings_dialog(frame: &Frame, shared: &Rc<Shared>) {
         *sh.check_cconv.borrow_mut() = cconv_box.get_value();
         dlg.end_modal(ID_OK);
     });
-    sizer.add(&close_btn, 0, SizerFlag::AlignCenterHorizontal | SizerFlag::All, 8);
+    sizer.add(
+        &close_btn,
+        0,
+        SizerFlag::AlignCenterHorizontal | SizerFlag::All,
+        8,
+    );
 
     panel.set_sizer(sizer, true);
     let dialog_sizer = BoxSizer::builder(Orientation::Vertical).build();
@@ -1334,7 +1555,12 @@ fn show_shortcuts_dialog(frame: &Frame) {
     close_btn.on_click(move |_| {
         dlg.end_modal(ID_OK);
     });
-    sizer.add(&close_btn, 0, SizerFlag::AlignCenterHorizontal | SizerFlag::All, 6);
+    sizer.add(
+        &close_btn,
+        0,
+        SizerFlag::AlignCenterHorizontal | SizerFlag::All,
+        6,
+    );
 
     panel.set_sizer(sizer, true);
     let dialog_sizer = BoxSizer::builder(Orientation::Vertical).build();

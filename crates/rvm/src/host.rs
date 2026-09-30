@@ -95,7 +95,11 @@ impl StdHost {
 impl Default for StdHost {
     // fds 0-2 stand for stdin/out/err, so program files start at 3.
     fn default() -> Self {
-        StdHost { rng_streams: HashMap::new(), files: HashMap::new(), next_fd: 3 }
+        StdHost {
+            rng_streams: HashMap::new(),
+            files: HashMap::new(),
+            next_fd: 3,
+        }
     }
 }
 
@@ -116,7 +120,8 @@ impl Host for StdHost {
 
     fn confirm(&mut self, message: &str) -> bool {
         self.write_output(&format!("{message} [y/n] "));
-        self.read_line().is_some_and(|l| l.trim().starts_with(['y', 'Y']))
+        self.read_line()
+            .is_some_and(|l| l.trim().starts_with(['y', 'Y']))
     }
 
     fn file_open(&mut self, path: &str, write: bool, append: bool) -> i32 {
@@ -255,12 +260,17 @@ impl Default for ScriptHost {
 
 impl ScriptHost {
     pub fn with_input(lines: Vec<String>) -> Self {
-        ScriptHost { input: Rc::new(RefCell::new(lines)), ..Default::default() }
+        ScriptHost {
+            input: Rc::new(RefCell::new(lines)),
+            ..Default::default()
+        }
     }
 
     /// Seed a file image so the program can open and read it by name.
     pub fn set_file(&self, name: &str, contents: &[u8]) {
-        self.files.borrow_mut().insert(name.to_string(), contents.to_vec());
+        self.files
+            .borrow_mut()
+            .insert(name.to_string(), contents.to_vec());
     }
 
     /// The current bytes stored under `name` (what a program wrote, or the
@@ -303,7 +313,8 @@ impl Host for ScriptHost {
     }
 
     fn confirm(&mut self, _message: &str) -> bool {
-        self.read_line().is_some_and(|l| l.trim().starts_with(['y', 'Y']))
+        self.read_line()
+            .is_some_and(|l| l.trim().starts_with(['y', 'Y']))
     }
 
     fn file_open(&mut self, path: &str, write: bool, append: bool) -> i32 {
@@ -317,23 +328,36 @@ impl Host for ScriptHost {
         } else if !files.contains_key(path) {
             return -1; // nothing seeded under this name
         }
-        let pos = if append { files.get(path).map_or(0, |v| v.len()) } else { 0 };
+        let pos = if append {
+            files.get(path).map_or(0, |v| v.len())
+        } else {
+            0
+        };
         let fd = *self.next_fd.borrow();
         *self.next_fd.borrow_mut() += 1;
-        self.open
-            .borrow_mut()
-            .insert(fd, OpenScriptFile { name: path.to_string(), pos, write });
+        self.open.borrow_mut().insert(
+            fd,
+            OpenScriptFile {
+                name: path.to_string(),
+                pos,
+                write,
+            },
+        );
         fd
     }
 
     fn file_read(&mut self, fd: i32, buf: &mut [u8]) -> i32 {
         let mut open = self.open.borrow_mut();
         let files = self.files.borrow();
-        let Some(f) = open.get_mut(&fd) else { return -1 };
+        let Some(f) = open.get_mut(&fd) else {
+            return -1;
+        };
         if f.write {
             return -1;
         }
-        let Some(image) = files.get(&f.name) else { return -1 };
+        let Some(image) = files.get(&f.name) else {
+            return -1;
+        };
         let n = image.len().saturating_sub(f.pos).min(buf.len());
         buf[..n].copy_from_slice(&image[f.pos..f.pos + n]);
         f.pos += n;
@@ -343,11 +367,15 @@ impl Host for ScriptHost {
     fn file_write(&mut self, fd: i32, bytes: &[u8]) -> i32 {
         let mut open = self.open.borrow_mut();
         let mut files = self.files.borrow_mut();
-        let Some(f) = open.get_mut(&fd) else { return -1 };
+        let Some(f) = open.get_mut(&fd) else {
+            return -1;
+        };
         if !f.write {
             return -1;
         }
-        let Some(image) = files.get_mut(&f.name) else { return -1 };
+        let Some(image) = files.get_mut(&f.name) else {
+            return -1;
+        };
         let end = f.pos + bytes.len();
         if image.len() < end {
             image.resize(end, 0);
@@ -360,7 +388,9 @@ impl Host for ScriptHost {
     fn file_seek(&mut self, fd: i32, offset: i32, whence: i32) -> i32 {
         let mut open = self.open.borrow_mut();
         let files = self.files.borrow();
-        let Some(f) = open.get_mut(&fd) else { return -1 };
+        let Some(f) = open.get_mut(&fd) else {
+            return -1;
+        };
         let base: i64 = match whence {
             0 => 0,
             1 => f.pos as i64,

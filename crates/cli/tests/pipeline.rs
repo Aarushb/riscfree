@@ -30,7 +30,10 @@ done:
 
 #[test]
 fn fibonacci_pipeline() {
-    let files = vec![InputFile { name: "fib.s".into(), source: FIB.into() }];
+    let files = vec![InputFile {
+        name: "fib.s".into(),
+        source: FIB.into(),
+    }];
     let result = rvasm::assemble(&files, &AsmConfig::default());
     assert!(!result.has_errors(), "diags: {:?}", result.diagnostics);
     let program = result.program.unwrap();
@@ -40,12 +43,17 @@ fn fibonacci_pipeline() {
     let mut machine = Machine::new(program, Box::new(host.clone()), MachineConfig::default());
     let events = machine.run(None);
 
-    let expected: Vec<i32> = (0..12).scan((0i32, 1i32), |st, _| {
-        let out = st.0;
-        *st = (st.1, st.0 + st.1);
-        Some(out)
-    }).collect();
-    let printed = expected.iter().map(|n| format!("{n}\n")).collect::<String>();
+    let expected: Vec<i32> = (0..12)
+        .scan((0i32, 1i32), |st, _| {
+            let out = st.0;
+            *st = (st.1, st.0 + st.1);
+            Some(out)
+        })
+        .collect();
+    let printed = expected
+        .iter()
+        .map(|n| format!("{n}\n"))
+        .collect::<String>();
     assert_eq!(host.take_output(), printed);
     assert_eq!(events.last(), Some(&Event::Halted(Halt::Exit { code: 0 })));
     // Prologue: 3 (each `li` is one addi here) + 12 iterations x 12 loop
@@ -56,18 +64,32 @@ fn fibonacci_pipeline() {
 #[test]
 fn diagnostics_surface_file_line_col() {
     let files = vec![
-        InputFile { name: "a.s".into(), source: "j missing\n".into() },
-        InputFile { name: "b.s".into(), source: "bogus a0, a1\n".into() },
+        InputFile {
+            name: "a.s".into(),
+            source: "j missing\n".into(),
+        },
+        InputFile {
+            name: "b.s".into(),
+            source: "bogus a0, a1\n".into(),
+        },
     ];
     let result = rvasm::assemble(&files, &AsmConfig::default());
     assert!(result.has_errors());
     assert_eq!(result.diagnostics.len(), 2);
     // Pass-one diagnostics (unknown mnemonic) come before pass-two
     // (unresolved symbol) diagnostics, so look them up by code.
-    let undef = result.diagnostics.iter().find(|d| d.code == "E-UNDEF").expect("E-UNDEF diagnostic");
+    let undef = result
+        .diagnostics
+        .iter()
+        .find(|d| d.code == "E-UNDEF")
+        .expect("E-UNDEF diagnostic");
     assert_eq!(files[undef.pos.file].name, "a.s");
     assert_eq!(undef.pos.line, 1);
-    let mnemonic = result.diagnostics.iter().find(|d| d.code == "E-MNEMONIC").expect("E-MNEMONIC diagnostic");
+    let mnemonic = result
+        .diagnostics
+        .iter()
+        .find(|d| d.code == "E-MNEMONIC")
+        .expect("E-MNEMONIC diagnostic");
     assert_eq!(files[mnemonic.pos.file].name, "b.s");
     assert_eq!(mnemonic.pos.line, 1);
 }

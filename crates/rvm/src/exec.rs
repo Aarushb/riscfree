@@ -20,7 +20,12 @@ pub(crate) struct ExecOutcome {
 impl ExecOutcome {
     fn ok(changes: Vec<Change>, events: Vec<Event>, pc_before: u32) -> Self {
         ExecOutcome {
-            outcome: StepOutcome { executed: true, pc_before, events, changes },
+            outcome: StepOutcome {
+                executed: true,
+                pc_before,
+                events,
+                changes,
+            },
             terminated_now: false,
             exception: None,
         }
@@ -30,7 +35,12 @@ impl ExecOutcome {
         let mut evs = events;
         evs.push(Event::Halted(h.clone()));
         ExecOutcome {
-            outcome: StepOutcome { executed: false, pc_before, events: evs, changes: Vec::new() },
+            outcome: StepOutcome {
+                executed: false,
+                pc_before,
+                events: evs,
+                changes: Vec::new(),
+            },
             terminated_now: true,
             exception: None,
         }
@@ -48,12 +58,22 @@ impl ExecOutcome {
 /// Map a memory fault to its exception cause and utval.
 fn mem_exception(e: &MemError, store: bool) -> (u32, u64) {
     match e {
-        MemError::Unaligned { addr, .. } => {
-            (if store { exc::STORE_MISALIGNED } else { exc::LOAD_MISALIGNED }, u64::from(*addr))
-        }
-        MemError::AccessViolation { addr } => {
-            (if store { exc::STORE_FAULT } else { exc::LOAD_FAULT }, u64::from(*addr))
-        }
+        MemError::Unaligned { addr, .. } => (
+            if store {
+                exc::STORE_MISALIGNED
+            } else {
+                exc::LOAD_MISALIGNED
+            },
+            u64::from(*addr),
+        ),
+        MemError::AccessViolation { addr } => (
+            if store {
+                exc::STORE_FAULT
+            } else {
+                exc::LOAD_FAULT
+            },
+            u64::from(*addr),
+        ),
     }
 }
 
@@ -79,7 +99,10 @@ fn imm_s(w: u32) -> u64 {
 
 fn imm_b(w: u32) -> u64 {
     sx(
-        (((w >> 31) & 0x1) << 12) | (((w >> 7) & 0x1) << 11) | (((w >> 25) & 0x3f) << 5) | (((w >> 8) & 0xf) << 1),
+        (((w >> 31) & 0x1) << 12)
+            | (((w >> 7) & 0x1) << 11)
+            | (((w >> 25) & 0x3f) << 5)
+            | (((w >> 8) & 0xf) << 1),
         13,
     )
 }
@@ -109,7 +132,11 @@ fn shamt_of(m: &Machine, w: u32) -> u64 {
 
 /// Register shift amount mask: RV32 uses the low 5 bits, RV64 the low 6.
 fn shift_mask(m: &Machine) -> u64 {
-    if m.rv64() { 0x3f } else { 0x1f }
+    if m.rv64() {
+        0x3f
+    } else {
+        0x1f
+    }
 }
 
 fn rd(w: u32) -> usize {
@@ -232,7 +259,9 @@ pub(crate) fn execute(m: &mut Machine, w: u32, pc_before: u32) -> ExecOutcome {
                 Ok(v) => m.write_reg(rd(w), v, &mut changes),
                 Err(e) => {
                     return ExecOutcome::halt_exc(
-                        Halt::Error { message: e.to_string() },
+                        Halt::Error {
+                            message: e.to_string(),
+                        },
                         events,
                         pc_before,
                         Some(mem_exception(&e, false)),
@@ -254,7 +283,9 @@ pub(crate) fn execute(m: &mut Machine, w: u32, pc_before: u32) -> ExecOutcome {
             };
             if let Err(e) = r {
                 return ExecOutcome::halt_exc(
-                    Halt::Error { message: e.to_string() },
+                    Halt::Error {
+                        message: e.to_string(),
+                    },
                     events,
                     pc_before,
                     Some(mem_exception(&e, true)),
@@ -303,9 +334,9 @@ pub(crate) fn execute(m: &mut Machine, w: u32, pc_before: u32) -> ExecOutcome {
             let b = m.regs[rs2(w)];
             let mask = shift_mask(m);
             let v = match ((w >> 12) & 0x7, (w >> 25) & 0x3f) {
-                (0, 0x00) => a.wrapping_add(b),           // add
-                (0, 0x20) => a.wrapping_sub(b),           // sub
-                (1, 0x00) => a << (b & mask),             // sll
+                (0, 0x00) => a.wrapping_add(b), // add
+                (0, 0x20) => a.wrapping_sub(b), // sub
+                (1, 0x00) => a << (b & mask),   // sll
                 (2, 0x00) => {
                     if m.rv64() {
                         ((a as i64) < (b as i64)) as u64 // slt
@@ -320,11 +351,11 @@ pub(crate) fn execute(m: &mut Machine, w: u32, pc_before: u32) -> ExecOutcome {
                         ((a as u32) < (b as u32)) as u64
                     }
                 }
-                (4, 0x00) => a ^ b,                       // xor
-                (5, 0x00) => a >> (b & mask),             // srl
+                (4, 0x00) => a ^ b,                             // xor
+                (5, 0x00) => a >> (b & mask),                   // srl
                 (5, 0x20) => ((a as i64) >> (b & mask)) as u64, // sra
-                (6, 0x00) => a | b,                       // or
-                (7, 0x00) => a & b,                       // and
+                (6, 0x00) => a | b,                             // or
+                (7, 0x00) => a & b,                             // and
                 // RV32M: results are 32-bit and stored sign-extended. RV64M
                 // runs the same rules on full 64-bit operands.
                 (0, 0x01) if m.rv64() => (a as i64).wrapping_mul(b as i64) as u64, // mul
@@ -366,7 +397,11 @@ pub(crate) fn execute(m: &mut Machine, w: u32, pc_before: u32) -> ExecOutcome {
                 }
                 (7, 0x01) if m.rv64() => {
                     let (x, y) = (a, b);
-                    if y == 0 { x } else { x % y }
+                    if y == 0 {
+                        x
+                    } else {
+                        x % y
+                    }
                 }
                 // RV32M: results are 32-bit and stored sign-extended.
                 (0, 0x01) => (a as u32 as i32).wrapping_mul(b as u32 as i32) as i64 as u64, // mul
@@ -374,7 +409,7 @@ pub(crate) fn execute(m: &mut Machine, w: u32, pc_before: u32) -> ExecOutcome {
                 // exact upper half (arithmetic for mulh/mulhsu).
                 (1, 0x01) => (((a as u32 as i32 as i64) * (b as u32 as i32 as i64)) >> 32) as u64, // mulh
                 (2, 0x01) => (((a as u32 as i32 as i64) * (b as u32 as i64)) >> 32) as u64, // mulhsu
-                (3, 0x01) => ((a as u32 as u64) * (b as u32 as u64)) >> 32, // mulhu
+                (3, 0x01) => ((a as u32 as u64) * (b as u32 as u64)) >> 32,                 // mulhu
                 // div/rem follow RISC-V's no-trap rules: divide by zero
                 // yields -1 / the dividend, and MIN/-1 overflow yields
                 // MIN / 0 instead of trapping.
@@ -421,7 +456,7 @@ pub(crate) fn execute(m: &mut Machine, w: u32, pc_before: u32) -> ExecOutcome {
             let a = m.regs[rs1(w)];
             let v = match (w >> 12) & 0x7 {
                 0 => sx32(a.wrapping_add(imm_i(w)) as u32), // addiw
-                1 => sx32((a as u32) << shamt(w)), // slliw
+                1 => sx32((a as u32) << shamt(w)),          // slliw
                 5 => {
                     if (w >> 25) & 0x20 != 0 {
                         sx32((((a as u32) as i32) >> shamt(w)) as u32) // sraiw
@@ -439,12 +474,12 @@ pub(crate) fn execute(m: &mut Machine, w: u32, pc_before: u32) -> ExecOutcome {
             let a = m.regs[rs1(w)];
             let b = m.regs[rs2(w)];
             let v = match ((w >> 12) & 0x7, (w >> 25) & 0x3f) {
-                (0, 0x00) => sx32(a.wrapping_add(b) as u32),           // addw
-                (0, 0x20) => sx32(a.wrapping_sub(b) as u32),           // subw
-                (1, 0x00) => sx32((a << (b & 0x1f)) as u32),           // sllw
-                (5, 0x00) => sx32((a >> (b & 0x1f)) as u32),           // srlw
+                (0, 0x00) => sx32(a.wrapping_add(b) as u32), // addw
+                (0, 0x20) => sx32(a.wrapping_sub(b) as u32), // subw
+                (1, 0x00) => sx32((a << (b & 0x1f)) as u32), // sllw
+                (5, 0x00) => sx32((a >> (b & 0x1f)) as u32), // srlw
                 (5, 0x20) => sx32((((a as u32) as i32) >> (b & 0x1f)) as u32), // sraw
-                (0, 0x01) => sx32((a as u32).wrapping_mul(b as u32)),  // mulw
+                (0, 0x01) => sx32((a as u32).wrapping_mul(b as u32)), // mulw
                 (4, 0x01) => {
                     let (x, y) = (a as u32 as i32, b as u32 as i32);
                     let r: i32 = if y == 0 {
@@ -493,7 +528,11 @@ pub(crate) fn execute(m: &mut Machine, w: u32, pc_before: u32) -> ExecOutcome {
             };
             match m.load_bytes(addr, width, &mut changes) {
                 Ok(v) => {
-                    let boxed = if width == 4 { fp::box_single(v as u32) } else { v };
+                    let boxed = if width == 4 {
+                        fp::box_single(v as u32)
+                    } else {
+                        v
+                    };
                     m.write_freg(rd(w), boxed, &mut changes);
                 }
                 Err(e) => bail!(e.to_string()),
@@ -529,7 +568,11 @@ pub(crate) fn execute(m: &mut Machine, w: u32, pc_before: u32) -> ExecOutcome {
                     // ecall
                     let step = crate::syscalls::dispatch(m, &mut events, pc_before);
                     let terminated_now = step.events.iter().any(|e| matches!(e, Event::Halted(_)));
-                    return ExecOutcome { outcome: step, terminated_now, exception: None };
+                    return ExecOutcome {
+                        outcome: step,
+                        terminated_now,
+                        exception: None,
+                    };
                 } else if imm12 == 1 {
                     m.terminated = Some(Halt::Ebreak);
                     return ExecOutcome::halt(Halt::Ebreak, events, pc_before);
@@ -546,7 +589,12 @@ pub(crate) fn execute(m: &mut Machine, w: u32, pc_before: u32) -> ExecOutcome {
                         m.pc = pc_before;
                         m.waiting = true;
                         return ExecOutcome {
-                            outcome: StepOutcome { executed: false, pc_before, events, changes },
+                            outcome: StepOutcome {
+                                executed: false,
+                                pc_before,
+                                events,
+                                changes,
+                            },
                             terminated_now: false,
                             exception: None,
                         };
@@ -559,11 +607,11 @@ pub(crate) fn execute(m: &mut Machine, w: u32, pc_before: u32) -> ExecOutcome {
                 let csr_id = ((w >> 20) & 0xfff) as u16;
                 let old = m.read_csr(csr_id);
                 let write_val = match funct3 {
-                    1 => Some(m.regs[rs1(w)]),                       // csrrw
-                    2 => (m.regs[rs1(w)] != 0).then(|| m.regs[rs1(w)]), // csrrs
-                    3 => (m.regs[rs1(w)] != 0).then(|| !m.regs[rs1(w)]), // csrrc
-                    5 => Some(imm_i(w) as u32 as u64),               // csrrwi
-                    6 => (imm_i(w) != 0).then_some(imm_i(w) as u32 as u64), // csrrsi
+                    1 => Some(m.regs[rs1(w)]),                                 // csrrw
+                    2 => (m.regs[rs1(w)] != 0).then(|| m.regs[rs1(w)]),        // csrrs
+                    3 => (m.regs[rs1(w)] != 0).then(|| !m.regs[rs1(w)]),       // csrrc
+                    5 => Some(imm_i(w) as u32 as u64),                         // csrrwi
+                    6 => (imm_i(w) != 0).then_some(imm_i(w) as u32 as u64),    // csrrsi
                     7 => (imm_i(w) != 0).then_some(!(imm_i(w) as u32 as u64)), // csrrci
                     _ => bail!("invalid csr instruction".to_string()),
                 };
@@ -624,7 +672,11 @@ fn fp_op(m: &mut Machine, w: u32, changes: &mut Vec<Change>) -> Result<(), Strin
             let val = if dbl {
                 fp::sign_inject64(a, b, f3)
             } else {
-                fp::box_single(fp::sign_inject32(fp::single_bits(a), fp::single_bits(b), f3))
+                fp::box_single(fp::sign_inject32(
+                    fp::single_bits(a),
+                    fp::single_bits(b),
+                    f3,
+                ))
             };
             m.write_freg(rd, val, changes);
         }
@@ -638,7 +690,11 @@ fn fp_op(m: &mut Machine, w: u32, changes: &mut Vec<Change>) -> Result<(), Strin
             let val = if dbl {
                 fp::min_max64(a, b, f3 == 1)
             } else {
-                fp::box_single(fp::min_max32(fp::single_bits(a), fp::single_bits(b), f3 == 1))
+                fp::box_single(fp::min_max32(
+                    fp::single_bits(a),
+                    fp::single_bits(b),
+                    f3 == 1,
+                ))
             };
             m.write_freg(rd, val, changes);
         }
@@ -708,7 +764,12 @@ fn fp_op(m: &mut Machine, w: u32, changes: &mut Vec<Change>) -> Result<(), Strin
             let a = m.fregs[rs1(w)];
             let (res, flags) = match rs2(w) {
                 2 | 3 => fp::cvt_to_int64(a, dbl, rm, unsigned),
-                _ => fp::cvt_to_int(if dbl { a } else { fp::single_bits(a) as u64 }, dbl, rm, unsigned),
+                _ => fp::cvt_to_int(
+                    if dbl { a } else { fp::single_bits(a) as u64 },
+                    dbl,
+                    rm,
+                    unsigned,
+                ),
             };
             m.write_reg(rd, res, changes);
             m.acc_fflags(flags, changes);
@@ -763,7 +824,11 @@ fn fp_op(m: &mut Machine, w: u32, changes: &mut Vec<Change>) -> Result<(), Strin
                     m.write_reg(rd, a, changes);
                 }
                 (1, _) => {
-                    let mask = if dbl { fp::classify64(a) } else { fp::classify32(fp::single_bits(a)) };
+                    let mask = if dbl {
+                        fp::classify64(a)
+                    } else {
+                        fp::classify32(fp::single_bits(a))
+                    };
                     m.write_reg(rd, mask, changes);
                 }
                 _ => return Err(format!("invalid fmv.x/fclass encoding (funct3 {f3})")),
@@ -802,12 +867,21 @@ fn fp_fma(m: &mut Machine, w: u32, changes: &mut Vec<Change>) -> Result<(), Stri
         0x4b => fp::FmaKind::Fnmsub,
         _ => fp::FmaKind::Fnmadd,
     };
-    let (a, b, c) = (m.fregs[rs1(w)], m.fregs[rs2(w)], m.fregs[((w >> 27) & 0x1f) as usize]);
+    let (a, b, c) = (
+        m.fregs[rs1(w)],
+        m.fregs[rs2(w)],
+        m.fregs[((w >> 27) & 0x1f) as usize],
+    );
     let (val, flags) = if fmt == 1 {
         fp::double_fma(kind, a, b, c, rm)
     } else {
-        let (v, fl) =
-            fp::single_fma(kind, fp::single_bits(a), fp::single_bits(b), fp::single_bits(c), rm);
+        let (v, fl) = fp::single_fma(
+            kind,
+            fp::single_bits(a),
+            fp::single_bits(b),
+            fp::single_bits(c),
+            rm,
+        );
         (fp::box_single(v), fl)
     };
     m.write_freg(rd(w), val, changes);
@@ -914,8 +988,8 @@ target:
         m.run(None);
         assert_eq!(m.reg(12), 1); // -1 < 1 signed
         assert_eq!(m.reg(13), 0); // 0xffffffff > 1 unsigned
-        // sltiu sign-extends the immediate then compares unsigned:
-        // 1 < 0xffffffff → 1
+                                  // sltiu sign-extends the immediate then compares unsigned:
+                                  // 1 < 0xffffffff → 1
         assert_eq!(m.reg(14), 1);
     }
 
@@ -938,7 +1012,7 @@ target:
         assert_eq!(m.reg(12) as u32 as i32, -21); // mul keeps the low 32 bits
         assert_eq!(m.reg(14), 1); // mulhu: 0x10000^2 >> 32
         assert_eq!(m.reg(15), 1); // mulh agrees with mulhu on positive operands
-        // mulhsu(-3, 0x10000): (-3 * 65536) >> 32 floors to -1.
+                                  // mulhsu(-3, 0x10000): (-3 * 65536) >> 32 floors to -1.
         assert_eq!(m.reg(16) as u32 as i32, -1);
         // Exact worst case: i32::MIN * u32::MAX = 0x8000_0000_8000_0000,
         // so the upper half is i32::MIN itself.
@@ -997,7 +1071,7 @@ target:
         assert_eq!(m.reg(15), 7); // rem: rs1 passes through
         assert_eq!(m.reg(16), u64::MAX); // divu: 0xffffffff, sign-extended
         assert_eq!(m.reg(17), 7); // remu: rs1's low 32 bits
-        // Unsigned view of -2 is 0xfffffffe, which swallows the small dividend.
+                                  // Unsigned view of -2 is 0xfffffffe, which swallows the small dividend.
         assert_eq!(m.reg(18), 0); // divu: 7 / 0xfffffffe = 0
         assert_eq!(m.reg(19), 7); // remu: 7 % 0xfffffffe = 7
     }
@@ -1022,7 +1096,10 @@ vb: .float 2.25
         m.run(None);
         assert_eq!(m.reg(10), 3.75f32.to_bits() as i32 as i64 as u64);
         // NaN-boxed register contents.
-        assert_eq!(m.freg(3), 0xffff_ffff_0000_0000u64 | 3.75f32.to_bits() as u64);
+        assert_eq!(
+            m.freg(3),
+            0xffff_ffff_0000_0000u64 | 3.75f32.to_bits() as u64
+        );
     }
 
     #[test]
@@ -1432,7 +1509,10 @@ three: .float 3.0
         let w = fp_r(0x00, 2, 1, 5, 3);
         let pc = m.program().text_base;
         let out = execute(&mut m, w, pc);
-        assert!(matches!(out.outcome.events.last(), Some(Event::Halted(Halt::Error { .. }))));
+        assert!(matches!(
+            out.outcome.events.last(),
+            Some(Event::Halted(Halt::Error { .. }))
+        ));
     }
 
     // ---- RV64 mode (MachineConfig::rv64) ----
@@ -1469,13 +1549,13 @@ three: .float 3.0
 
     #[test]
     fn rv64_ld_sd_roundtrip() {
-        // sp is 4-aligned by the fixed memory map, so the doubleword goes at
-        // sp-4 (8-aligned) like a real program would after `addi sp, sp, -8`.
+        // sp is 8-aligned, so the doubleword slots in at sp-8 exactly like a
+        // real prologue would after `addi sp, sp, -16`.
         let src = "\
     li t0, 0x123456789abcdef
-    sd t0, -4(sp)
-    ld a0, -4(sp)
-    ld a1, 4(sp)            # untouched memory reads zero
+    sd t0, -8(sp)
+    ld a0, -8(sp)
+    ld a1, 8(sp)            # untouched memory reads zero
 ";
         let mut m = machine64(src);
         m.run(None);
@@ -1484,7 +1564,7 @@ three: .float 3.0
         // The doubleword really sits in memory, little-endian.
         let mut buf = [0u8; 8];
         let sp = m.reg(2) as u32;
-        m.peek_bytes(sp - 4, &mut buf).unwrap();
+        m.peek_bytes(sp - 8, &mut buf).unwrap();
         assert_eq!(buf, 0x0123_4567_89ab_cdefu64.to_le_bytes());
     }
 

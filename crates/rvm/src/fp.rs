@@ -56,7 +56,11 @@ pub(crate) fn box_single(bits: u32) -> u64 {
 
 /// Resolve an encoded rm field: 7 (DYN) reads the frm CSR; 5/6 are reserved.
 pub(crate) fn resolve_rm(rm_field: u32, frm: u64) -> Option<u8> {
-    let rm = if rm_field == DYN as u32 { (frm & 0x7) as u8 } else { rm_field as u8 };
+    let rm = if rm_field == DYN as u32 {
+        (frm & 0x7) as u8
+    } else {
+        rm_field as u8
+    };
     match rm {
         RNE | RTZ | RDN | RUP | RMM => Some(rm),
         _ => None,
@@ -178,19 +182,35 @@ fn step_zero64(p: f64) -> f64 {
 }
 
 pub(crate) fn inf32(neg: bool) -> u32 {
-    if neg { 0xff80_0000 } else { 0x7f80_0000 }
+    if neg {
+        0xff80_0000
+    } else {
+        0x7f80_0000
+    }
 }
 
 fn zero32(neg: bool) -> u32 {
-    if neg { F32_SIGN } else { 0 }
+    if neg {
+        F32_SIGN
+    } else {
+        0
+    }
 }
 
 fn inf64(neg: bool) -> u64 {
-    if neg { 0xfff0_0000_0000_0000 } else { 0x7ff0_0000_0000_0000 }
+    if neg {
+        0xfff0_0000_0000_0000
+    } else {
+        0x7ff0_0000_0000_0000
+    }
 }
 
 fn zero64(neg: bool) -> u64 {
-    if neg { 0x8000_0000_0000_0000 } else { 0 }
+    if neg {
+        0x8000_0000_0000_0000
+    } else {
+        0
+    }
 }
 
 /// Knuth two-sum: `s + err` reconstructs `a + b` exactly.
@@ -256,7 +276,11 @@ pub(crate) fn single_bin(op: BinOp, a_bits: u32, b_bits: u32, rm: u8) -> (u32, u
     }
     let a = f32::from_bits(a_bits);
     let b = f32::from_bits(b_bits);
-    let (x, y) = if matches!(op, BinOp::Sub) { (a, -b) } else { (a, b) };
+    let (x, y) = if matches!(op, BinOp::Sub) {
+        (a, -b)
+    } else {
+        (a, b)
+    };
     let exact: f64 = match op {
         BinOp::Add | BinOp::Sub => {
             if x.is_infinite() && y.is_infinite() && x.is_sign_negative() != y.is_sign_negative() {
@@ -310,7 +334,11 @@ pub(crate) fn double_bin(op: BinOp, a_bits: u64, b_bits: u64, rm: u8) -> (u64, u
     }
     let a = f64::from_bits(a_bits);
     let b = f64::from_bits(b_bits);
-    let (x, y) = if matches!(op, BinOp::Sub) { (a, -b) } else { (a, b) };
+    let (x, y) = if matches!(op, BinOp::Sub) {
+        (a, -b)
+    } else {
+        (a, b)
+    };
     match op {
         BinOp::Add | BinOp::Sub => {
             if x.is_infinite() && y.is_infinite() && x.is_sign_negative() != y.is_sign_negative() {
@@ -442,7 +470,13 @@ pub(crate) fn double_sqrt(a_bits: u64, rm: u8) -> (u64, u8) {
     (bits, tiny_flags(subnormal64(bits), NX))
 }
 
-pub(crate) fn single_fma(kind: FmaKind, a_bits: u32, b_bits: u32, c_bits: u32, rm: u8) -> (u32, u8) {
+pub(crate) fn single_fma(
+    kind: FmaKind,
+    a_bits: u32,
+    b_bits: u32,
+    c_bits: u32,
+    rm: u8,
+) -> (u32, u8) {
     if let Some(fl) = nan_in(
         f32_is_nan(a_bits) || f32_is_nan(b_bits) || f32_is_nan(c_bits),
         false,
@@ -481,7 +515,11 @@ pub(crate) fn single_fma(kind: FmaKind, a_bits: u32, b_bits: u32, c_bits: u32, r
         let bits = v.to_bits();
         // The fused result is exact iff it reproduces the exact sum.
         let exact = s1 + e1;
-        let mut flags = if e1 != 0.0 || v as f64 != exact { NX } else { 0 };
+        let mut flags = if e1 != 0.0 || v as f64 != exact {
+            NX
+        } else {
+            0
+        };
         if v.is_infinite() {
             flags |= OF | NX;
         }
@@ -496,7 +534,13 @@ pub(crate) fn single_fma(kind: FmaKind, a_bits: u32, b_bits: u32, c_bits: u32, r
     (bits, flags)
 }
 
-pub(crate) fn double_fma(kind: FmaKind, a_bits: u64, b_bits: u64, c_bits: u64, rm: u8) -> (u64, u8) {
+pub(crate) fn double_fma(
+    kind: FmaKind,
+    a_bits: u64,
+    b_bits: u64,
+    c_bits: u64,
+    rm: u8,
+) -> (u64, u8) {
     if let Some(fl) = nan_in(
         f64_is_nan(a_bits) || f64_is_nan(b_bits) || f64_is_nan(c_bits),
         false,
@@ -543,7 +587,14 @@ pub(crate) fn double_fma(kind: FmaKind, a_bits: u64, b_bits: u64, c_bits: u64, r
     let e2 = e1 + e;
     let (s2, e3) = two_sum(s1, e2);
     let (bits, flags) = round_exact_to_f64(s2, e3, rm);
-    (if negate { bits ^ 0x8000_0000_0000_0000 } else { bits }, flags)
+    (
+        if negate {
+            bits ^ 0x8000_0000_0000_0000
+        } else {
+            bits
+        },
+        flags,
+    )
 }
 
 /// fle (0) / flt (1) / feq (2). Quiet NaNs raise invalid only for the
@@ -590,7 +641,11 @@ pub(crate) fn min_max32(a_bits: u32, b_bits: u32, want_max: bool) -> u32 {
     if a == 0.0 && b == 0.0 {
         let a_neg = a_bits & F32_SIGN != 0;
         let b_neg = b_bits & F32_SIGN != 0;
-        let neg = if want_max { a_neg && b_neg } else { a_neg || b_neg };
+        let neg = if want_max {
+            a_neg && b_neg
+        } else {
+            a_neg || b_neg
+        };
         return zero32(neg);
     }
     if want_max {
@@ -609,7 +664,11 @@ pub(crate) fn min_max64(a_bits: u64, b_bits: u64, want_max: bool) -> u64 {
     if a == 0.0 && b == 0.0 {
         let a_neg = a_bits >> 63 != 0;
         let b_neg = b_bits >> 63 != 0;
-        let neg = if want_max { a_neg && b_neg } else { a_neg || b_neg };
+        let neg = if want_max {
+            a_neg && b_neg
+        } else {
+            a_neg || b_neg
+        };
         return zero64(neg);
     }
     if want_max {
@@ -645,11 +704,11 @@ pub(crate) fn classify32(bits: u32) -> u64 {
     let man = bits & 0x007f_ffff;
     let neg = bits & F32_SIGN != 0;
     match (exp, man) {
-        (0xff, 0) => 1 << if neg { 0 } else { 7 },           // ±inf
+        (0xff, 0) => 1 << if neg { 0 } else { 7 }, // ±inf
         (0xff, _) => 1 << if man & 0x0040_0000 == 0 { 8 } else { 9 }, // sNaN/qNaN
-        (0, 0) => 1 << if neg { 3 } else { 4 },               // ±0
-        (0, _) => 1 << if neg { 2 } else { 5 },               // subnormal
-        _ => 1 << if neg { 1 } else { 6 },                    // normal
+        (0, 0) => 1 << if neg { 3 } else { 4 },    // ±0
+        (0, _) => 1 << if neg { 2 } else { 5 },    // subnormal
+        _ => 1 << if neg { 1 } else { 6 },         // normal
     }
 }
 
@@ -659,7 +718,13 @@ pub(crate) fn classify64(bits: u64) -> u64 {
     let neg = bits >> 63 != 0;
     match (exp, man) {
         (0x7ff, 0) => 1 << if neg { 0 } else { 7 },
-        (0x7ff, _) => 1 << if man & 0x0008_0000_0000_0000 == 0 { 8 } else { 9 },
+        (0x7ff, _) => {
+            1 << if man & 0x0008_0000_0000_0000 == 0 {
+                8
+            } else {
+                9
+            }
+        }
         (0, 0) => 1 << if neg { 3 } else { 4 },
         (0, _) => 1 << if neg { 2 } else { 5 },
         _ => 1 << if neg { 1 } else { 6 },
@@ -699,12 +764,24 @@ fn round_to_integer(v: f64, rm: u8) -> f64 {
 /// behavior; the 2019 spec's toward-side clipping is a documented
 /// simplification.
 pub(crate) fn cvt_to_int(bits: u64, is_double: bool, rm: u8, unsigned: bool) -> (u64, u8) {
-    let max = if unsigned { 0xffff_ffffu64 } else { 0x7fff_ffff };
-    let nan = if is_double { f64_is_nan(bits) } else { f32_is_nan(bits as u32) };
+    let max = if unsigned {
+        0xffff_ffffu64
+    } else {
+        0x7fff_ffff
+    };
+    let nan = if is_double {
+        f64_is_nan(bits)
+    } else {
+        f32_is_nan(bits as u32)
+    };
     if nan {
         return (max as i32 as i64 as u64, NV);
     }
-    let v: f64 = if is_double { f64::from_bits(bits) } else { f32::from_bits(bits as u32) as f64 };
+    let v: f64 = if is_double {
+        f64::from_bits(bits)
+    } else {
+        f32::from_bits(bits as u32) as f64
+    };
     if v.is_infinite() {
         return (max as i32 as i64 as u64, NV);
     }
@@ -726,7 +803,11 @@ pub(crate) fn cvt_to_int(bits: u64, is_double: bool, rm: u8, unsigned: bool) -> 
 /// FCVT int→f32: the i32/u32 source widens exactly into f64, then rounds
 /// onto the f32 grid (inexact for large integers).
 pub(crate) fn cvt_int_to_f32(v: u64, unsigned: bool, rm: u8) -> (u32, u8) {
-    let x: f64 = if unsigned { v as u32 as f64 } else { v as i32 as f64 };
+    let x: f64 = if unsigned {
+        v as u32 as f64
+    } else {
+        v as i32 as f64
+    };
     round_f64_to_f32_bits(x, rm)
 }
 
@@ -735,11 +816,19 @@ pub(crate) fn cvt_int_to_f32(v: u64, unsigned: bool, rm: u8) -> (u32, u8) {
 /// the target type's positive maximum with NV — the same documented
 /// simplification as the 32-bit path.
 pub(crate) fn cvt_to_int64(bits: u64, is_double: bool, rm: u8, unsigned: bool) -> (u64, u8) {
-    let nan = if is_double { f64_is_nan(bits) } else { f32_is_nan(bits as u32) };
+    let nan = if is_double {
+        f64_is_nan(bits)
+    } else {
+        f32_is_nan(bits as u32)
+    };
     if nan {
         return (if unsigned { u64::MAX } else { i64::MAX as u64 }, NV);
     }
-    let v: f64 = if is_double { f64::from_bits(bits) } else { f32::from_bits(bits as u32) as f64 };
+    let v: f64 = if is_double {
+        f64::from_bits(bits)
+    } else {
+        f32::from_bits(bits as u32) as f64
+    };
     if v.is_infinite() {
         return (if unsigned { u64::MAX } else { i64::MAX as u64 }, NV);
     }
@@ -771,16 +860,32 @@ fn exact_on_grid(mag: u64, mantissa_bits: u32) -> bool {
 /// Host integer→float casts are correctly rounded RNE; other modes fall
 /// back to RNE, the same documented fallback as 64-bit div/sqrt.
 pub(crate) fn cvt_int64_to_f32(v: u64, unsigned: bool, _rm: u8) -> (u32, u8) {
-    let x: f32 = if unsigned { v as f32 } else { (v as i64) as f32 };
-    let mag = if unsigned { v } else { (v as i64).unsigned_abs() };
+    let x: f32 = if unsigned {
+        v as f32
+    } else {
+        (v as i64) as f32
+    };
+    let mag = if unsigned {
+        v
+    } else {
+        (v as i64).unsigned_abs()
+    };
     let flags = if exact_on_grid(mag, 23) { 0 } else { NX };
     (x.to_bits(), flags)
 }
 
 /// FCVT int→f64 from a 64-bit source (fcvt.d.l/fcvt.d.lu, RV64 only).
 pub(crate) fn cvt_int64_to_f64(v: u64, unsigned: bool, _rm: u8) -> (u64, u8) {
-    let x: f64 = if unsigned { v as f64 } else { (v as i64) as f64 };
-    let mag = if unsigned { v } else { (v as i64).unsigned_abs() };
+    let x: f64 = if unsigned {
+        v as f64
+    } else {
+        (v as i64) as f64
+    };
+    let mag = if unsigned {
+        v
+    } else {
+        (v as i64).unsigned_abs()
+    };
     let flags = if exact_on_grid(mag, 52) { 0 } else { NX };
     (x.to_bits(), flags)
 }
@@ -829,7 +934,14 @@ enum Dir {
 pub(crate) fn round_f64_to_f32_bits(v: f64, rm: u8) -> (u32, u8) {
     debug_assert!(!v.is_nan());
     if v.is_infinite() {
-        return (if v.is_sign_negative() { 0xff80_0000 } else { 0x7f80_0000 }, 0);
+        return (
+            if v.is_sign_negative() {
+                0xff80_0000
+            } else {
+                0x7f80_0000
+            },
+            0,
+        );
     }
     let neg = v.is_sign_negative();
     let mag = v.abs();
@@ -890,7 +1002,11 @@ pub(crate) fn round_f64_to_f32_bits(v: f64, rm: u8) -> (u32, u8) {
                 // the bracket.
                 let (lo, hi) = if (rne as f64) > mag {
                     (
-                        if rne.to_bits() >= 1 { f32::from_bits(rne.to_bits() - 1) } else { rne },
+                        if rne.to_bits() >= 1 {
+                            f32::from_bits(rne.to_bits() - 1)
+                        } else {
+                            rne
+                        },
                         rne,
                     )
                 } else {
@@ -996,7 +1112,10 @@ mod tests {
         assert_eq!(bits, f32::INFINITY.to_bits());
         assert_eq!(fl, NX | OF);
         // RTZ clamps to the largest finite but still raises OF|NX.
-        assert_eq!(round_f64_to_f32_bits(big, RTZ), (f32::MAX.to_bits(), NX | OF));
+        assert_eq!(
+            round_f64_to_f32_bits(big, RTZ),
+            (f32::MAX.to_bits(), NX | OF)
+        );
         assert_eq!(round_f64_to_f32_bits(big, RDN).0, f32::MAX.to_bits());
         assert_eq!(round_f64_to_f32_bits(big, RUP).0, f32::INFINITY.to_bits());
         // Below max + half an ulp, RNE stays finite with just NX.
@@ -1019,7 +1138,10 @@ mod tests {
         // An exactly representable subnormal: no flags at all.
         assert_eq!(round_f64_to_f32_bits(step, RNE).1, 0);
         // Min-normal/2 is exactly representable as a subnormal — no flags.
-        assert_eq!(round_f64_to_f32_bits(f64::from(f32::MIN_POSITIVE) / 2.0, RNE).1, 0);
+        assert_eq!(
+            round_f64_to_f32_bits(f64::from(f32::MIN_POSITIVE) / 2.0, RNE).1,
+            0
+        );
     }
 
     #[test]
@@ -1063,24 +1185,45 @@ mod tests {
         let (bits, fl) = single_bin(BinOp::Add, 1.5f32.to_bits(), 2.25f32.to_bits(), RNE);
         assert_eq!((bits, fl), (3.75f32.to_bits(), 0));
         // -0 + -0 = -0; +0 + -0 = +0.
-        assert_eq!(single_bin(BinOp::Add, zero32(true), zero32(true), RNE).0, zero32(true));
-        assert_eq!(single_bin(BinOp::Add, zero32(false), zero32(true), RNE).0, zero32(false));
+        assert_eq!(
+            single_bin(BinOp::Add, zero32(true), zero32(true), RNE).0,
+            zero32(true)
+        );
+        assert_eq!(
+            single_bin(BinOp::Add, zero32(false), zero32(true), RNE).0,
+            zero32(false)
+        );
         // inf + -inf invalid; inf + 1 = inf.
         assert_eq!(
             single_bin(BinOp::Add, inf32(false), inf32(true), RNE),
             (F32_NAN, NV)
         );
-        assert_eq!(single_bin(BinOp::Add, inf32(false), 1.0f32.to_bits(), RNE).0, inf32(false));
+        assert_eq!(
+            single_bin(BinOp::Add, inf32(false), 1.0f32.to_bits(), RNE).0,
+            inf32(false)
+        );
         // Quiet NaN propagates without flags, signaling raises NV.
-        assert_eq!(single_bin(BinOp::Add, F32_NAN, 1.0f32.to_bits(), RNE), (F32_NAN, 0));
+        assert_eq!(
+            single_bin(BinOp::Add, F32_NAN, 1.0f32.to_bits(), RNE),
+            (F32_NAN, 0)
+        );
         assert_eq!(
             single_bin(BinOp::Add, 0x7f80_0001, 1.0f32.to_bits(), RNE),
             (F32_NAN, NV)
         );
         // Division: 1/0 = +inf + DZ; 0/0 invalid; inf/0 = inf.
-        assert_eq!(single_bin(BinOp::Div, 1.0f32.to_bits(), zero32(false), RNE), (inf32(false), DZ));
-        assert_eq!(single_bin(BinOp::Div, zero32(false), zero32(false), RNE), (F32_NAN, NV));
-        assert_eq!(single_bin(BinOp::Div, inf32(false), zero32(true), RNE), (inf32(true), 0));
+        assert_eq!(
+            single_bin(BinOp::Div, 1.0f32.to_bits(), zero32(false), RNE),
+            (inf32(false), DZ)
+        );
+        assert_eq!(
+            single_bin(BinOp::Div, zero32(false), zero32(false), RNE),
+            (F32_NAN, NV)
+        );
+        assert_eq!(
+            single_bin(BinOp::Div, inf32(false), zero32(true), RNE),
+            (inf32(true), 0)
+        );
         // 1/3 is inexact.
         let (_, fl) = single_bin(BinOp::Div, 1.0f32.to_bits(), 3.0f32.to_bits(), RNE);
         assert_eq!(fl, NX);
@@ -1106,8 +1249,14 @@ mod tests {
         // 1 - 2^-54 sits exactly half an ulp below 1: RTZ takes it, RNE
         // ties to the even 1.0.
         let half = (1.0f64 - 1.0f64.next_down()) / 2.0;
-        assert_eq!(double_bin(BinOp::Add, 1.0f64.to_bits(), (-half).to_bits(), RTZ).0, 1.0f64.next_down().to_bits());
-        assert_eq!(double_bin(BinOp::Add, 1.0f64.to_bits(), (-half).to_bits(), RNE).0, 1.0f64.to_bits());
+        assert_eq!(
+            double_bin(BinOp::Add, 1.0f64.to_bits(), (-half).to_bits(), RTZ).0,
+            1.0f64.next_down().to_bits()
+        );
+        assert_eq!(
+            double_bin(BinOp::Add, 1.0f64.to_bits(), (-half).to_bits(), RNE).0,
+            1.0f64.to_bits()
+        );
         // 1/3 inexact in every mode.
         for rm in [RNE, RTZ, RDN, RUP, RMM] {
             let (_, fl) = double_bin(BinOp::Div, 1.0f64.to_bits(), 3.0f64.to_bits(), rm);
@@ -1117,11 +1266,23 @@ mod tests {
         // down under RNE (q under-estimates, so RTZ keeps q and RUP steps
         // up), while 10/3 rounds up (RTZ steps down, RUP keeps q).
         let q = 4.0f64 / 3.0f64; // native RNE quotient
-        assert_eq!(double_bin(BinOp::Div, 4.0f64.to_bits(), 3.0f64.to_bits(), RTZ).0, q.to_bits());
-        assert_eq!(double_bin(BinOp::Div, 4.0f64.to_bits(), 3.0f64.to_bits(), RUP).0, q.next_up().to_bits());
+        assert_eq!(
+            double_bin(BinOp::Div, 4.0f64.to_bits(), 3.0f64.to_bits(), RTZ).0,
+            q.to_bits()
+        );
+        assert_eq!(
+            double_bin(BinOp::Div, 4.0f64.to_bits(), 3.0f64.to_bits(), RUP).0,
+            q.next_up().to_bits()
+        );
         let q = 10.0f64 / 3.0f64;
-        assert_eq!(double_bin(BinOp::Div, 10.0f64.to_bits(), 3.0f64.to_bits(), RTZ).0, q.next_down().to_bits());
-        assert_eq!(double_bin(BinOp::Div, 10.0f64.to_bits(), 3.0f64.to_bits(), RUP).0, q.to_bits());
+        assert_eq!(
+            double_bin(BinOp::Div, 10.0f64.to_bits(), 3.0f64.to_bits(), RTZ).0,
+            q.next_down().to_bits()
+        );
+        assert_eq!(
+            double_bin(BinOp::Div, 10.0f64.to_bits(), 3.0f64.to_bits(), RUP).0,
+            q.to_bits()
+        );
         // Overflow.
         let (_, fl) = double_bin(BinOp::Mul, f64::MAX.to_bits(), 2.0f64.to_bits(), RNE);
         assert_eq!(fl, OF | NX);
@@ -1150,14 +1311,26 @@ mod tests {
         assert_ne!(fused, sep);
         // fmsub/fnmadd/fnmsub sign conventions.
         let d = 2.0f32.to_bits();
-        assert_eq!(single_fma(FmaKind::Fmsub, a, b, d, RNE).0, single_bin(BinOp::Add, mul_bits, (-2.0f32).to_bits(), RNE).0);
+        assert_eq!(
+            single_fma(FmaKind::Fmsub, a, b, d, RNE).0,
+            single_bin(BinOp::Add, mul_bits, (-2.0f32).to_bits(), RNE).0
+        );
         let (fnm, _) = single_fma(FmaKind::Fnmadd, a, b, d, RNE);
         assert_eq!(fnm ^ F32_SIGN, single_bin(BinOp::Add, mul_bits, d, RNE).0);
         let (fns, _) = single_fma(FmaKind::Fnmsub, a, b, d, RNE);
-        assert_eq!(fns ^ F32_SIGN, single_bin(BinOp::Add, mul_bits, (-2.0f32).to_bits(), RNE).0);
+        assert_eq!(
+            fns ^ F32_SIGN,
+            single_bin(BinOp::Add, mul_bits, (-2.0f32).to_bits(), RNE).0
+        );
         // 0 * inf + c is invalid.
         assert_eq!(
-            single_fma(FmaKind::Fmadd, zero32(false), inf32(false), 1.0f32.to_bits(), RNE),
+            single_fma(
+                FmaKind::Fmadd,
+                zero32(false),
+                inf32(false),
+                1.0f32.to_bits(),
+                RNE
+            ),
             (F32_NAN, NV)
         );
     }
@@ -1170,7 +1343,10 @@ mod tests {
         assert_eq!(bits, f64::powi(2.0, -51).to_bits());
         // fcvt.w.s truncates toward zero (rm RTZ baked by the assembler).
         assert_eq!(cvt_to_int(1.9f32.to_bits() as u64, false, RTZ, false).0, 1);
-        assert_eq!(cvt_to_int((-1.9f32).to_bits() as u64, false, RTZ, false).0, (-1i32) as i64 as u64);
+        assert_eq!(
+            cvt_to_int((-1.9f32).to_bits() as u64, false, RTZ, false).0,
+            (-1i32) as i64 as u64
+        );
         // Out of range and NaN → positive max + NV. The 32-bit 0xffffffff
         // result sign-extends per the register convention.
         let (v, fl) = cvt_to_int(3.0e9f32.to_bits() as u64, false, RTZ, false);
@@ -1179,14 +1355,17 @@ mod tests {
         assert_eq!((v, fl), (0x7fff_ffff, NV));
         let (v, fl) = cvt_to_int(F32_NAN as u64, false, RTZ, true);
         assert_eq!((v, fl), (u64::MAX, NV)); // 0xffffffff sign-extended
-        // fcvt.s.w of i32::MAX is inexact (rounds to 2^31).
+                                             // fcvt.s.w of i32::MAX is inexact (rounds to 2^31).
         let (bits, fl) = cvt_int_to_f32(i32::MAX as u64, false, RNE);
         assert_eq!((bits, fl), ((2.0f32.powi(31)).to_bits(), NX));
         // u32::MAX → 2^32 exactly.
         let (bits, fl) = cvt_int_to_f32(u32::MAX as u64, true, RNE);
         assert_eq!((bits, fl), (4294967296.0f32.to_bits(), NX));
         // Int → f64 is exact.
-        assert_eq!(cvt_int_to_f64(i32::MIN as u64, false), (i32::MIN as f64).to_bits());
+        assert_eq!(
+            cvt_int_to_f64(i32::MIN as u64, false),
+            (i32::MIN as f64).to_bits()
+        );
         // f64 → f32 narrowing with modes.
         let v = 1.0 + 3.0 * f64::powi(2.0, -25);
         assert_eq!(cvt_f64_to_f32(v.to_bits(), RNE).0, 0x3f80_0001);
@@ -1195,8 +1374,14 @@ mod tests {
 
     #[test]
     fn min_max_sign_inject_classify() {
-        assert_eq!(min_max32(1.5f32.to_bits(), 2.5f32.to_bits(), false), 1.5f32.to_bits());
-        assert_eq!(min_max32(1.5f32.to_bits(), 2.5f32.to_bits(), true), 2.5f32.to_bits());
+        assert_eq!(
+            min_max32(1.5f32.to_bits(), 2.5f32.to_bits(), false),
+            1.5f32.to_bits()
+        );
+        assert_eq!(
+            min_max32(1.5f32.to_bits(), 2.5f32.to_bits(), true),
+            2.5f32.to_bits()
+        );
         // NaN operand → canonical NaN either way.
         assert_eq!(min_max32(F32_NAN, 1.0f32.to_bits(), true), F32_NAN);
         // fmax(-0, +0) = +0; fmin(-0, +0) = -0.
@@ -1231,7 +1416,7 @@ mod tests {
         assert_eq!(compare32(2.0f32.to_bits(), 2.0f32.to_bits(), 0), (1, 0)); // fle
         assert_eq!(compare32(1.0f32.to_bits(), 2.0f32.to_bits(), 2), (0, 0)); // feq
         assert_eq!(compare32(zero32(true), zero32(false), 2), (1, 0)); // -0 == +0
-        // Ordered comparisons raise NV on any NaN; feq only on sNaN.
+                                                                       // Ordered comparisons raise NV on any NaN; feq only on sNaN.
         assert_eq!(compare32(F32_NAN, 1.0f32.to_bits(), 1).1, NV);
         assert_eq!(compare32(F32_NAN, 1.0f32.to_bits(), 2).1, 0);
         assert_eq!(compare32(0x7f80_0001, 1.0f32.to_bits(), 2).1, NV);

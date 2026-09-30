@@ -21,7 +21,12 @@ pub(crate) fn dispatch(m: &mut Machine, events: &mut Vec<Event>, pc_before: u32)
             m.terminated = Some(h.clone());
             let mut evs = std::mem::take(events);
             evs.push(Event::Halted(h));
-            StepOutcome { executed: false, pc_before, events: evs, changes: Vec::new() }
+            StepOutcome {
+                executed: false,
+                pc_before,
+                events: evs,
+                changes: Vec::new(),
+            }
         }
     }
 }
@@ -66,7 +71,11 @@ fn run_syscall(m: &mut Machine, code: u32, changes: &mut Vec<Change>) -> Result<
         }
         12 => {
             // ReadChar
-            let c = m.host_mut().read_char().map(u64::from).unwrap_or(u64::from(u32::MAX));
+            let c = m
+                .host_mut()
+                .read_char()
+                .map(u64::from)
+                .unwrap_or(u64::from(u32::MAX));
             m.write_reg(10, c, changes);
         }
         50 => {
@@ -131,7 +140,8 @@ fn run_syscall(m: &mut Machine, code: u32, changes: &mut Vec<Change>) -> Result<
         }
         56 => {
             // MessageDialogInt
-            m.host_mut().write_output(&format!("{}\n", a0 as u32 as i32));
+            m.host_mut()
+                .write_output(&format!("{}\n", a0 as u32 as i32));
         }
         58 => {
             // MessageDialogDouble
@@ -155,7 +165,9 @@ fn run_syscall(m: &mut Machine, code: u32, changes: &mut Vec<Change>) -> Result<
         }
         62 => {
             // LSeek (whence 0 = start, 1 = current, 2 = end)
-            let n = m.host_mut().file_seek(a0 as u32 as i32, a1 as u32 as i32, a2 as u32 as i32);
+            let n = m
+                .host_mut()
+                .file_seek(a0 as u32 as i32, a1 as u32 as i32, a2 as u32 as i32);
             m.write_reg(10, n as i64 as u64, changes);
         }
         63 => {
@@ -241,7 +253,11 @@ fn run_syscall(m: &mut Machine, code: u32, changes: &mut Vec<Change>) -> Result<
             let d = m.host_mut().random_double(a0 as u32);
             m.fregs[10] = d.to_bits();
         }
-        93 => return Err(Halt::Exit { code: a0 as u32 as i32 }),
+        93 => {
+            return Err(Halt::Exit {
+                code: a0 as u32 as i32,
+            })
+        }
         other => {
             return Err(Halt::Error {
                 message: format!("service {other} is not available in this build"),
@@ -331,7 +347,9 @@ mod tests {
         let events = m.run(None);
         assert_eq!(
             events.last(),
-            Some(&Event::Halted(Halt::Error { message: "service 999 is not available in this build".into() }))
+            Some(&Event::Halted(Halt::Error {
+                message: "service 999 is not available in this build".into()
+            }))
         );
     }
 
@@ -384,7 +402,10 @@ buffer: .space 16
         assert_eq!(m.reg(19) as u32 as i32, 4); // s3: next fd
         assert_eq!(m.reg(20), 5); // s4: 5 bytes read
         assert_eq!(host.take_output(), "hello");
-        assert_eq!(host.file_contents("rvm-test.txt").as_deref(), Some(b"hello".as_slice()));
+        assert_eq!(
+            host.file_contents("rvm-test.txt").as_deref(),
+            Some(b"hello".as_slice())
+        );
     }
 
     #[test]

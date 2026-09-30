@@ -2,8 +2,8 @@
 //! accessible, labeled controls. Converts between raw bits and float values
 //! in both directions; no machine state involved.
 
-use std::rc::Rc;
 use std::cell::RefCell;
+use std::rc::Rc;
 use wxdragon::prelude::*;
 
 pub struct FloatRepTool {
@@ -36,7 +36,9 @@ impl FloatRepTool {
         });
 
         // Bits -> float.
-        let bits_label = StaticText::builder(&panel).with_label("Bits (8 hex digits):").build();
+        let bits_label = StaticText::builder(&panel)
+            .with_label("Bits (8 hex digits):")
+            .build();
         sizer.add(&bits_label, 0, SizerFlag::All, 2);
         let bits_input = TextCtrl::builder(&panel).build();
         bits_input.set_value("41200000");
@@ -45,7 +47,9 @@ impl FloatRepTool {
         sizer.add(&bits_input, 0, SizerFlag::Expand | SizerFlag::All, 2);
 
         // Float -> bits.
-        let float_label = StaticText::builder(&panel).with_label("Float value:").build();
+        let float_label = StaticText::builder(&panel)
+            .with_label("Float value:")
+            .build();
         sizer.add(&float_label, 0, SizerFlag::All, 2);
         let float_input = TextCtrl::builder(&panel).build();
         float_input.set_value("10.0");
@@ -60,7 +64,9 @@ impl FloatRepTool {
 
         let result_label = StaticText::builder(&panel).with_label("Result:").build();
         sizer.add(&result_label, 0, SizerFlag::All, 2);
-        let result = StaticText::builder(&panel).with_label("enter a value and choose Convert").build();
+        let result = StaticText::builder(&panel)
+            .with_label("enter a value and choose Convert")
+            .build();
         result.set_accessibility_label("Conversion result");
         sizer.add(&result, 0, SizerFlag::All, 2);
 

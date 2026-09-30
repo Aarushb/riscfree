@@ -33,7 +33,9 @@ use crate::{Halt, Machine, Undo};
 const S_REGS: [usize; 12] = [8, 9, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27];
 
 /// ABI names for the saved registers, for read-aloud descriptions.
-const S_NAME: [&str; 12] = ["s0", "s1", "s2", "s3", "s4", "s5", "s6", "s7", "s8", "s9", "s10", "s11"];
+const S_NAME: [&str; 12] = [
+    "s0", "s1", "s2", "s3", "s4", "s5", "s6", "s7", "s8", "s9", "s10", "s11",
+];
 
 /// One activation record: what the callee promised to hand back, snapshotted
 /// when a call wrote ra.
@@ -63,7 +65,11 @@ impl Machine {
         if rd == 1 {
             // CALL: remember the world as the callee receives it.
             let s = std::array::from_fn(|i| self.regs[S_REGS[i]]);
-            self.callstack.push(Frame { sp: self.regs[2], s, call_pc: pc_before });
+            self.callstack.push(Frame {
+                sp: self.regs[2],
+                s,
+                call_pc: pc_before,
+            });
             self.journal.push(Undo::CcPush);
         } else if opcode == 0x67 && rd == 0 {
             // RETURN. An empty stack passes: main returning to the loader
@@ -75,7 +81,10 @@ impl Machine {
             for (i, &reg) in S_REGS.iter().enumerate() {
                 let now = self.regs[reg];
                 if now != frame.s[i] {
-                    broken.push(format!("{} was {} at call, now {}", S_NAME[i], frame.s[i], now));
+                    broken.push(format!(
+                        "{} was {} at call, now {}",
+                        S_NAME[i], frame.s[i], now
+                    ));
                 }
             }
             let sp_now = self.regs[2];
@@ -119,7 +128,10 @@ mod tests {
     }
 
     fn cconv_cfg() -> MachineConfig {
-        MachineConfig { check_calling_convention: true, ..MachineConfig::default() }
+        MachineConfig {
+            check_calling_convention: true,
+            ..MachineConfig::default()
+        }
     }
 
     fn stop_text(m: &Machine) -> Option<String> {
@@ -132,7 +144,11 @@ mod tests {
     /// main keeps a live value in s0 across a call; `clobber` says whether
     /// work() trashes s0, `sp_drift` says whether its epilogue restores sp.
     fn caller_src(clobber: bool, sp_drift: bool) -> String {
-        let restore = if sp_drift { "addi sp, sp, 4" } else { "addi sp, sp, 8" };
+        let restore = if sp_drift {
+            "addi sp, sp, 4"
+        } else {
+            "addi sp, sp, 8"
+        };
         let clobber_line = if clobber { "    li s0, 7\n" } else { "" };
         format!(
             "\
@@ -207,7 +223,10 @@ work:
     fn clobbered_s0_halts_naming_old_and_new_values() {
         let mut m = machine_cfg(&caller_src(true, false), cconv_cfg());
         let events = m.run(None);
-        assert!(matches!(events.last(), Some(Event::Halted(Halt::CallingConvention { .. }))));
+        assert!(matches!(
+            events.last(),
+            Some(Event::Halted(Halt::CallingConvention { .. }))
+        ));
         // jal sits on line 3, so the return lands on line 4 (li a7, 10).
         assert_eq!(
             stop_text(&m).as_deref(),
@@ -221,12 +240,15 @@ work:
     fn sp_corruption_on_return_halts_naming_both_values() {
         let mut m = machine_cfg(&caller_src(false, true), cconv_cfg());
         let events = m.run(None);
-        assert!(matches!(events.last(), Some(Event::Halted(Halt::CallingConvention { .. }))));
+        assert!(matches!(
+            events.last(),
+            Some(Event::Halted(Halt::CallingConvention { .. }))
+        ));
         // jal sits on line 3, so the return lands on line 4; work restored
         // ra faithfully but came back with sp four bytes short.
         assert_eq!(
             stop_text(&m).as_deref(),
-            Some("calling convention violation on return to line 4: sp was 0x7fffeffc, now 0x7fffeff8"),
+            Some("calling convention violation on return to line 4: sp was 0x7fffeff8, now 0x7fffeff4"),
             "{:?}",
             stop_text(&m)
         );
@@ -249,7 +271,10 @@ work:
 ";
         let mut m = machine_cfg(src, cconv_cfg());
         let events = m.run(None);
-        assert!(matches!(events.last(), Some(Event::Halted(Halt::CallingConvention { .. }))));
+        assert!(matches!(
+            events.last(),
+            Some(Event::Halted(Halt::CallingConvention { .. }))
+        ));
         // jal sits on line 2, so the return lands on line 3 (li a7, 10).
         assert_eq!(
             stop_text(&m).as_deref(),
@@ -337,14 +362,17 @@ base:
 ";
         let mut m = machine_cfg(src, cconv_cfg());
         let events = m.run(None);
-        assert!(matches!(events.last(), Some(Event::Halted(Halt::CallingConvention { .. }))));
+        assert!(matches!(
+            events.last(),
+            Some(Event::Halted(Halt::CallingConvention { .. }))
+        ));
         // The base ret popped the inner record: the outer record stays.
         assert_eq!(m.callstack.len(), 1);
         assert_eq!(
             stop_text(&m).as_deref(),
             Some(
                 "calling convention violation on return to line 16: \
-                 s0 was 2 at call, now 99; sp was 0x7fffeff4, now 0x7fffefec"
+                 s0 was 2 at call, now 99; sp was 0x7fffeff0, now 0x7fffefe8"
             ),
             "{:?}",
             stop_text(&m)
@@ -412,7 +440,10 @@ base:
         m.step(); // jal again
         assert_eq!(m.callstack.len(), 1);
         m.run(None);
-        assert!(matches!(m.halt_reason(), Some(Halt::CallingConvention { .. })));
+        assert!(matches!(
+            m.halt_reason(),
+            Some(Halt::CallingConvention { .. })
+        ));
     }
 
     #[test]
@@ -500,7 +531,7 @@ loop:
     #[test]
     fn rv64_checks_the_same_rules_at_full_width() {
         // Same convention in 64-bit mode. The doubleword save sits at
-        // -4(sp) because the fixed initial sp is 8-aligned only at -4; the
+        // -8(sp): the initial sp is 8-aligned, so a doubleword save needs
         // clobbered s0 goes unreported-back and halts the return.
         let src = "\
 main:
@@ -510,20 +541,33 @@ main:
     ecall
 work:
     addi sp, sp, -8
-    sd ra, -4(sp)
+    sd ra, -8(sp)
     li s0, 7             # clobber, never restored
-    ld ra, -4(sp)
+    ld ra, -8(sp)
     addi sp, sp, 8
     ret
 ";
-        let files = vec![rvasm::InputFile { name: "t.s".into(), source: src.into() }];
-        let acfg = rvasm::AsmConfig { rv64: true, ..rvasm::AsmConfig::default() };
+        let files = vec![rvasm::InputFile {
+            name: "t.s".into(),
+            source: src.into(),
+        }];
+        let acfg = rvasm::AsmConfig {
+            rv64: true,
+            ..rvasm::AsmConfig::default()
+        };
         let r = rvasm::assemble(&files, &acfg);
         assert!(!r.has_errors(), "diags: {:?}", r.diagnostics);
-        let mcfg = MachineConfig { rv64: true, check_calling_convention: true, ..MachineConfig::default() };
+        let mcfg = MachineConfig {
+            rv64: true,
+            check_calling_convention: true,
+            ..MachineConfig::default()
+        };
         let mut m = Machine::new(r.program.unwrap(), Box::new(ScriptHost::default()), mcfg);
         let events = m.run(None);
-        assert!(matches!(events.last(), Some(Event::Halted(Halt::CallingConvention { .. }))));
+        assert!(matches!(
+            events.last(),
+            Some(Event::Halted(Halt::CallingConvention { .. }))
+        ));
         assert_eq!(
             stop_text(&m).as_deref(),
             Some("calling convention violation on return to line 4: s0 was 42 at call, now 7"),

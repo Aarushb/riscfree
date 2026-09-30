@@ -28,8 +28,9 @@ use crate::memory::PAGE_SIZE;
 /// ABI names for register-watch descriptions. Local copy because rvasm keeps
 /// its table private to its `asm` module and this crate cannot reach in.
 const ABI: [&str; 32] = [
-    "zero", "ra", "sp", "gp", "tp", "t0", "t1", "t2", "s0", "s1", "a0", "a1", "a2", "a3", "a4", "a5",
-    "a6", "a7", "s2", "s3", "s4", "s5", "s6", "s7", "s8", "s9", "s10", "s11", "t3", "t4", "t5", "t6",
+    "zero", "ra", "sp", "gp", "tp", "t0", "t1", "t2", "s0", "s1", "a0", "a1", "a2", "a3", "a4",
+    "a5", "a6", "a7", "s2", "s3", "s4", "s5", "s6", "s7", "s8", "s9", "s10", "s11", "t3", "t4",
+    "t5", "t6",
 ];
 
 /// What a watchpoint watches. Public so a watchpoints panel can list the
@@ -40,7 +41,12 @@ pub enum WatchSpec {
     /// `on_read`/`on_write` select the access kinds that stop. MMIO
     /// accesses count for the kinds their direction implies (an MMIO store
     /// is a write), so a watch over the MMIO window sees device traffic.
-    Mem { addr: u32, len: u32, on_read: bool, on_write: bool },
+    Mem {
+        addr: u32,
+        len: u32,
+        on_read: bool,
+        on_write: bool,
+    },
     /// Writes to one integer register. x0 is hardwired to zero and never
     /// written, so watching it never fires.
     Reg { index: usize },
@@ -70,7 +76,10 @@ impl InitShadow {
         while rest > 0 {
             let off = (addr as usize) % PAGE_SIZE;
             let n = (PAGE_SIZE - off).min(rest as usize);
-            let page = self.pages.entry(addr - off as u32).or_insert_with(|| vec![0; PAGE_SIZE]);
+            let page = self
+                .pages
+                .entry(addr - off as u32)
+                .or_insert_with(|| vec![0; PAGE_SIZE]);
             page[off..off + n].fill(1);
             rest -= n as u32;
             addr += n as u32;
@@ -80,7 +89,9 @@ impl InitShadow {
     /// True when the byte is initialized (a never-touched page is not).
     pub(crate) fn is_init(&self, addr: u32) -> bool {
         let off = (addr as usize) % PAGE_SIZE;
-        self.pages.get(&(addr - off as u32)).is_some_and(|p| p[off] != 0)
+        self.pages
+            .get(&(addr - off as u32))
+            .is_some_and(|p| p[off] != 0)
     }
 
     /// How many bytes of `[addr, addr + len)` are still uninitialized.
@@ -91,7 +102,9 @@ impl InitShadow {
             let off = (addr as usize) % PAGE_SIZE;
             let n = (PAGE_SIZE - off).min(rest as usize);
             match self.pages.get(&(addr - off as u32)) {
-                Some(page) => count += page[off..off + n].iter().filter(|b| **b == 0).count() as u32,
+                Some(page) => {
+                    count += page[off..off + n].iter().filter(|b| **b == 0).count() as u32
+                }
                 // A page never touched by an initializer is fully uninitialized.
                 None => count += n as u32,
             }
@@ -120,10 +133,24 @@ impl Machine {
     /// Watch a memory range: stop (after the access retires) when a load or
     /// store touches any watched byte in the selected direction. Returns a
     /// watchpoint id for `remove_watchpoint`.
-    pub fn add_mem_watchpoint(&mut self, addr: u32, len: u32, on_read: bool, on_write: bool) -> u32 {
+    pub fn add_mem_watchpoint(
+        &mut self,
+        addr: u32,
+        len: u32,
+        on_read: bool,
+        on_write: bool,
+    ) -> u32 {
         let id = self.next_watch_id;
         self.next_watch_id += 1;
-        self.watchpoints.push(Watch { id, spec: WatchSpec::Mem { addr, len, on_read, on_write } });
+        self.watchpoints.push(Watch {
+            id,
+            spec: WatchSpec::Mem {
+                addr,
+                len,
+                on_read,
+                on_write,
+            },
+        });
         id
     }
 
@@ -132,7 +159,10 @@ impl Machine {
     pub fn add_reg_watchpoint(&mut self, index: usize) -> u32 {
         let id = self.next_watch_id;
         self.next_watch_id += 1;
-        self.watchpoints.push(Watch { id, spec: WatchSpec::Reg { index } });
+        self.watchpoints.push(Watch {
+            id,
+            spec: WatchSpec::Reg { index },
+        });
         id
     }
 
@@ -163,7 +193,12 @@ impl Machine {
             return;
         }
         let hit = self.watchpoints.iter().find_map(|w| match w.spec {
-            WatchSpec::Mem { addr: wa, len, on_read, on_write } => {
+            WatchSpec::Mem {
+                addr: wa,
+                len,
+                on_read,
+                on_write,
+            } => {
                 let touched = addr < wa.wrapping_add(len) && wa < addr.wrapping_add(width);
                 (touched && (if write { on_write } else { on_read })).then_some((w.id, write))
             }
@@ -184,14 +219,20 @@ impl Machine {
         if self.pending_stop.is_some() || self.watchpoints.is_empty() {
             return;
         }
-        let hit =
-            self.watchpoints.iter().find_map(|w| match w.spec {
-                WatchSpec::Reg { index: ri } => (ri == index).then_some(w.id),
-                WatchSpec::Mem { .. } => None,
-            });
+        let hit = self.watchpoints.iter().find_map(|w| match w.spec {
+            WatchSpec::Reg { index: ri } => (ri == index).then_some(w.id),
+            WatchSpec::Mem { .. } => None,
+        });
         if let Some(id) = hit {
-            let name = if index < 32 { ABI[index].to_string() } else { format!("x{index}") };
-            let desc = format!("watchpoint {id}: write to register {name}{}", self.at_text());
+            let name = if index < 32 {
+                ABI[index].to_string()
+            } else {
+                format!("x{index}")
+            };
+            let desc = format!(
+                "watchpoint {id}: write to register {name}{}",
+                self.at_text()
+            );
             self.pending_stop = Some(Halt::Watchpoint { description: desc });
         }
     }
@@ -245,7 +286,10 @@ mod tests {
     }
 
     fn memcheck_cfg() -> MachineConfig {
-        MachineConfig { memcheck: true, ..MachineConfig::default() }
+        MachineConfig {
+            memcheck: true,
+            ..MachineConfig::default()
+        }
     }
 
     fn sym(m: &Machine, name: &str) -> u32 {
@@ -282,7 +326,10 @@ main:
         let id = m.add_mem_watchpoint(val, 4, false, true);
         assert_eq!(id, 0);
         let events = m.run(None);
-        assert!(matches!(events.last(), Some(Event::Halted(Halt::Watchpoint { .. }))));
+        assert!(matches!(
+            events.last(),
+            Some(Event::Halted(Halt::Watchpoint { .. }))
+        ));
         assert!(matches!(m.halt_reason(), Some(Halt::Watchpoint { .. })));
         // The store already landed (the stop follows the effect).
         let mut buf = [0u8; 4];
@@ -314,7 +361,10 @@ main:
         let v = sym(&m, "v");
         m.add_mem_watchpoint(v, 4, true, true);
         let events = m.run(None);
-        assert!(matches!(events.last(), Some(Event::Halted(Halt::Watchpoint { .. }))));
+        assert!(matches!(
+            events.last(),
+            Some(Event::Halted(Halt::Watchpoint { .. }))
+        ));
         assert_eq!(m.reg(10), 55); // the load landed, then the stop raised
         let desc = stop_text(&m).unwrap();
         assert!(desc.contains("read of"), "{desc}");
@@ -338,10 +388,16 @@ main:
         let mut m = machine(src);
         m.add_reg_watchpoint(11); // a1
         let events = m.run(None);
-        assert!(matches!(events.last(), Some(Event::Halted(Halt::Watchpoint { .. }))));
+        assert!(matches!(
+            events.last(),
+            Some(Event::Halted(Halt::Watchpoint { .. }))
+        ));
         assert_eq!(m.reg(11), 42); // the write landed
         let desc = stop_text(&m).unwrap();
-        assert_eq!(desc, "watchpoint 0: write to register a1 by addi at line 2", "{desc}");
+        assert_eq!(
+            desc, "watchpoint 0: write to register a1 by addi at line 2",
+            "{desc}"
+        );
         // Continue runs to completion: nothing writes a1 again.
         m.continue_after_stop();
         let events = m.run(None);
@@ -357,14 +413,22 @@ main:
     ecall
 ";
         let mut m = machine(src);
-        let mem_id = m.add_mem_watchpoint(0x7fff_effc, 4, false, true);
+        let mem_id = m.add_mem_watchpoint(0x7fff_eff4, 8, false, true);
         let reg_id = m.add_reg_watchpoint(10);
         // One shared id namespace.
         assert_ne!(mem_id, reg_id);
         assert_eq!(
             m.watchpoints(),
             vec![
-                (mem_id, WatchSpec::Mem { addr: 0x7fff_effc, len: 4, on_read: false, on_write: true }),
+                (
+                    mem_id,
+                    WatchSpec::Mem {
+                        addr: 0x7fff_eff4,
+                        len: 8,
+                        on_read: false,
+                        on_write: true
+                    }
+                ),
                 (reg_id, WatchSpec::Reg { index: 10 }),
             ]
         );
@@ -390,14 +454,17 @@ main:
         let sw_addr = m.program().statements[1].addr; // li is one instruction here
         m.set_breakpoint(sw_addr, true);
         m.add_mem_watchpoint(m.reg(2) as u32, 4, false, true); // [sp, sp+4)
-        // The breakpoint fires first: the store never ran.
+                                                               // The breakpoint fires first: the store never ran.
         let events = m.run(None);
         assert_eq!(events.last(), Some(&Event::Halted(Halt::Breakpoint)));
         assert_eq!(m.pc(), sw_addr);
         // Continue: the store lands and the watchpoint reports it.
         m.continue_after_stop();
         let events = m.run(None);
-        assert!(matches!(events.last(), Some(Event::Halted(Halt::Watchpoint { .. }))));
+        assert!(matches!(
+            events.last(),
+            Some(Event::Halted(Halt::Watchpoint { .. }))
+        ));
         // Continue past the watch: the program exits.
         m.continue_after_stop();
         let events = m.run(None);
@@ -430,7 +497,7 @@ main:
         let mut buf = [0u8; 4];
         m.peek_bytes(sym(&m, "val"), &mut buf).unwrap();
         assert_eq!(buf, [0; 4]); // the store was undone
-        // Re-executing refires the watch...
+                                 // Re-executing refires the watch...
         m.step();
         assert!(matches!(m.halt_reason(), Some(Halt::Watchpoint { .. })));
         // ...and continue_after_stop resumes past it (the halt is a pause,
@@ -456,7 +523,10 @@ loop:
         m.add_reg_watchpoint(10); // a0
         for want in 1..=3 {
             let events = m.run(None);
-            assert!(matches!(events.last(), Some(Event::Halted(Halt::Watchpoint { .. }))), "pass {want}");
+            assert!(
+                matches!(events.last(), Some(Event::Halted(Halt::Watchpoint { .. }))),
+                "pass {want}"
+            );
             assert_eq!(m.reg(10), want);
             m.continue_after_stop();
         }
@@ -479,7 +549,10 @@ main:
         let mut m = machine_with(src, Box::new(host.clone()));
         m.add_mem_watchpoint(0xffff_0000, 16, false, true);
         let events = m.run(None);
-        assert!(matches!(events.last(), Some(Event::Halted(Halt::Watchpoint { .. }))));
+        assert!(matches!(
+            events.last(),
+            Some(Event::Halted(Halt::Watchpoint { .. }))
+        ));
         // The device write landed before the stop (the 'X' was emitted).
         assert_eq!(host.take_output(), "X");
         let desc = stop_text(&m).unwrap();
@@ -503,7 +576,10 @@ main:
         assert!(!m.is_terminated());
         assert_eq!(m.watchpoints().len(), 1);
         let events = m.run(None);
-        assert!(matches!(events.last(), Some(Event::Halted(Halt::Watchpoint { .. }))));
+        assert!(matches!(
+            events.last(),
+            Some(Event::Halted(Halt::Watchpoint { .. }))
+        ));
     }
 
     #[test]
@@ -511,20 +587,30 @@ main:
         let src = "\
 main:
     li t0, 9
-    sd t0, -4(sp)
-    ld a0, -4(sp)
+    sd t0, -8(sp)
+    ld a0, -8(sp)
     li a7, 10
     ecall
 ";
         let mut m = machine64(src);
-        // [sp-4, sp+4) covers the whole doubleword.
+        // [sp-8, sp+8) covers the whole doubleword.
         m.add_mem_watchpoint(m.reg(2) as u32 - 4, 8, true, true);
         let events = m.run(None);
-        assert!(matches!(events.last(), Some(Event::Halted(Halt::Watchpoint { .. }))));
-        assert!(stop_text(&m).unwrap().contains("write to"), "{}", stop_text(&m).unwrap());
+        assert!(matches!(
+            events.last(),
+            Some(Event::Halted(Halt::Watchpoint { .. }))
+        ));
+        assert!(
+            stop_text(&m).unwrap().contains("write to"),
+            "{}",
+            stop_text(&m).unwrap()
+        );
         m.continue_after_stop();
         let events = m.run(None);
-        assert!(matches!(events.last(), Some(Event::Halted(Halt::Watchpoint { .. }))));
+        assert!(matches!(
+            events.last(),
+            Some(Event::Halted(Halt::Watchpoint { .. }))
+        ));
         assert_eq!(m.reg(10), 9);
         let desc = stop_text(&m).unwrap();
         assert!(desc.contains("read of"), "{desc}");
@@ -543,7 +629,10 @@ main:
 ";
         let mut m = machine_cfg(src, memcheck_cfg());
         let events = m.run(None);
-        assert!(matches!(events.last(), Some(Event::Halted(Halt::Memcheck { .. }))));
+        assert!(matches!(
+            events.last(),
+            Some(Event::Halted(Halt::Memcheck { .. }))
+        ));
         assert_eq!(
             stop_text(&m).as_deref(),
             Some("read of 4 bytes at 0x7fffeff0 touches 4 uninitialized bytes, loaded by lw at line 3"),
@@ -583,11 +672,16 @@ main:
             stop_text(&m)
         );
         // A byte-wide read reports byte-granular wording.
-        let mut m = machine_cfg("main:\n    li t0, 0x7fffeff0\n    lb a0, 2(t0)\n", memcheck_cfg());
+        let mut m = machine_cfg(
+            "main:\n    li t0, 0x7fffeff0\n    lb a0, 2(t0)\n",
+            memcheck_cfg(),
+        );
         m.run(None);
         assert_eq!(
             stop_text(&m).as_deref(),
-            Some("read of 1 byte at 0x7fffeff2 touches 1 uninitialized byte, loaded by lb at line 3"),
+            Some(
+                "read of 1 byte at 0x7fffeff2 touches 1 uninitialized byte, loaded by lb at line 3"
+            ),
             "{:?}",
             stop_text(&m)
         );
@@ -659,7 +753,10 @@ main:
         let mut m = machine_cfg(src, memcheck_cfg());
         m.run(None);
         let desc = stop_text(&m).unwrap_or_default();
-        assert!(desc.starts_with("read of 4 bytes at 0x10040000 touches 4 uninitialized bytes"), "{desc}");
+        assert!(
+            desc.starts_with("read of 4 bytes at 0x10040000 touches 4 uninitialized bytes"),
+            "{desc}"
+        );
     }
 
     #[test]
@@ -711,8 +808,8 @@ main:
             m.step();
         }
         assert_eq!(m.reg(10), 9); // the load passed: the store initialized
-        // Undo the load, then the store. The store journaled the shadow
-        // bytes it flipped, so its undo clears them again.
+                                  // Undo the load, then the store. The store journaled the shadow
+                                  // bytes it flipped, so its undo clears them again.
         assert!(m.backstep());
         assert_eq!(m.pc(), m.program().text_base + 16);
         assert!(m.shadow.is_init(0x7fff_eff0));
@@ -743,7 +840,10 @@ main:
         assert_eq!(m.exit_code(), Some(0));
         m.reset();
         let events = m.run(None);
-        assert!(matches!(events.last(), Some(Event::Halted(Halt::Memcheck { .. }))));
+        assert!(matches!(
+            events.last(),
+            Some(Event::Halted(Halt::Memcheck { .. }))
+        ));
         assert_eq!(stop_text(&m).as_deref(), Some(first.as_str()));
     }
 
@@ -791,8 +891,8 @@ main:
         let src = "\
 main:
     fcvt.s.w f2, zero
-    fsw f2, -4(sp)
-    flw f1, -4(sp)
+    fsw f2, -8(sp)
+    flw f1, -8(sp)
     li a7, 10
     ecall
 ";
@@ -802,7 +902,7 @@ main:
         // ...and an flw of never-written stack halts like an integer load.
         let src = "\
 main:
-    flw f1, -4(sp)
+    flw f1, -8(sp)
     li a7, 10
     ecall
 ";
@@ -816,21 +916,34 @@ main:
     fn rv64_doubleword_memcheck() {
         let src = "\
 main:
-    ld a0, -4(sp)
+    ld a0, -8(sp)
     li a7, 10
     ecall
 ";
-        let files = vec![rvasm::InputFile { name: "t.s".into(), source: src.into() }];
-        let acfg = rvasm::AsmConfig { rv64: true, ..rvasm::AsmConfig::default() };
+        let files = vec![rvasm::InputFile {
+            name: "t.s".into(),
+            source: src.into(),
+        }];
+        let acfg = rvasm::AsmConfig {
+            rv64: true,
+            ..rvasm::AsmConfig::default()
+        };
         let r = rvasm::assemble(&files, &acfg);
         assert!(!r.has_errors(), "diags: {:?}", r.diagnostics);
-        let mcfg = MachineConfig { rv64: true, memcheck: true, ..MachineConfig::default() };
+        let mcfg = MachineConfig {
+            rv64: true,
+            memcheck: true,
+            ..MachineConfig::default()
+        };
         let mut m = Machine::new(r.program.unwrap(), Box::new(ScriptHost::default()), mcfg);
         let events = m.run(None);
-        assert!(matches!(events.last(), Some(Event::Halted(Halt::Memcheck { .. }))));
+        assert!(matches!(
+            events.last(),
+            Some(Event::Halted(Halt::Memcheck { .. }))
+        ));
         assert_eq!(
             stop_text(&m).as_deref(),
-            Some("read of 8 bytes at 0x7fffeff8 touches 8 uninitialized bytes, loaded by ld at line 2"),
+            Some("read of 8 bytes at 0x7fffeff0 touches 8 uninitialized bytes, loaded by ld at line 2"),
             "{:?}",
             stop_text(&m)
         );

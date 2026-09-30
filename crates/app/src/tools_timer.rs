@@ -2,9 +2,9 @@
 //! driving source for interrupt-handler coursework, and shows the wait state.
 
 use crate::bridge::Cmd;
+use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::mpsc::Sender;
-use std::cell::RefCell;
 use wxdragon::prelude::*;
 
 pub struct TimerTool {
@@ -46,7 +46,9 @@ impl TimerTool {
         buttons.add(&clear, 0, SizerFlag::All, 4);
         sizer.add_sizer(&buttons, 0, SizerFlag::Expand, 0);
 
-        let status = StaticText::builder(&panel).with_label("Timer not armed.").build();
+        let status = StaticText::builder(&panel)
+            .with_label("Timer not armed.")
+            .build();
         status.set_accessibility_label("Timer status");
         sizer.add(&status, 0, SizerFlag::All, 2);
 
@@ -66,8 +68,9 @@ impl TimerTool {
                 status_for_arm.set_label("Enter a nonzero instruction count.");
             } else {
                 cmd_for_arm.send(Cmd::ArmTimer(value)).ok();
-                status_for_arm
-                    .set_label(&format!("Timer armed: an interrupt every {value} instructions."));
+                status_for_arm.set_label(&format!(
+                    "Timer armed: an interrupt every {value} instructions."
+                ));
             }
         });
         let status_for_clear = status;

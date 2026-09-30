@@ -40,32 +40,53 @@ pub fn lex_line(src: &str, pos: SourcePos, diags: &mut Vec<crate::Diagnostic>) -
             b' ' | b'\t' | b'\r' => i += 1,
             b'#' => break,
             b',' => {
-                out.push(Token { tok: Tok::Comma, pos: at });
+                out.push(Token {
+                    tok: Tok::Comma,
+                    pos: at,
+                });
                 i += 1;
             }
             b':' => {
-                out.push(Token { tok: Tok::Colon, pos: at });
+                out.push(Token {
+                    tok: Tok::Colon,
+                    pos: at,
+                });
                 i += 1;
             }
             b'(' => {
-                out.push(Token { tok: Tok::LParen, pos: at });
+                out.push(Token {
+                    tok: Tok::LParen,
+                    pos: at,
+                });
                 i += 1;
             }
             b')' => {
-                out.push(Token { tok: Tok::RParen, pos: at });
+                out.push(Token {
+                    tok: Tok::RParen,
+                    pos: at,
+                });
                 i += 1;
             }
             b'"' => {
                 let (s, next) = lex_string(bytes, i, at, diags);
-                out.push(Token { tok: Tok::Str(s), pos: at });
+                out.push(Token {
+                    tok: Tok::Str(s),
+                    pos: at,
+                });
                 i = next;
             }
             b'\'' => {
                 let (v, next) = lex_char(bytes, i, at, diags);
-                out.push(Token { tok: Tok::Int(v), pos: at });
+                out.push(Token {
+                    tok: Tok::Int(v),
+                    pos: at,
+                });
                 i = next;
             }
-            b'-' | b'+' if i + 1 < bytes.len() && (bytes[i + 1].is_ascii_digit() || is_float_start(&bytes[i + 1..])) => {
+            b'-' | b'+'
+                if i + 1 < bytes.len()
+                    && (bytes[i + 1].is_ascii_digit() || is_float_start(&bytes[i + 1..])) =>
+            {
                 let (tok, next) = lex_number_or_float(bytes, i, at, diags);
                 out.push(Token { tok, pos: at });
                 i = next;
@@ -87,7 +108,10 @@ pub fn lex_line(src: &str, pos: SourcePos, diags: &mut Vec<crate::Diagnostic>) -
                     }
                 }
                 let text = &src[start..i];
-                out.push(Token { tok: Tok::Ident(text.to_string()), pos: at });
+                out.push(Token {
+                    tok: Tok::Ident(text.to_string()),
+                    pos: at,
+                });
             }
             _ => {
                 diags.push(crate::Diagnostic::error(
@@ -102,7 +126,12 @@ pub fn lex_line(src: &str, pos: SourcePos, diags: &mut Vec<crate::Diagnostic>) -
     out
 }
 
-fn lex_string(bytes: &[u8], start: usize, pos: SourcePos, diags: &mut Vec<crate::Diagnostic>) -> (String, usize) {
+fn lex_string(
+    bytes: &[u8],
+    start: usize,
+    pos: SourcePos,
+    diags: &mut Vec<crate::Diagnostic>,
+) -> (String, usize) {
     let mut s = String::new();
     let mut i = start + 1;
     while i < bytes.len() {
@@ -146,7 +175,11 @@ fn lex_string(bytes: &[u8], start: usize, pos: SourcePos, diags: &mut Vec<crate:
             }
         }
     }
-    diags.push(crate::Diagnostic::error("E-STR", "unterminated string literal", pos));
+    diags.push(crate::Diagnostic::error(
+        "E-STR",
+        "unterminated string literal",
+        pos,
+    ));
     (s, bytes.len())
 }
 
@@ -159,10 +192,19 @@ fn utf8_len(b: u8) -> usize {
     }
 }
 
-fn lex_char(bytes: &[u8], start: usize, pos: SourcePos, diags: &mut Vec<crate::Diagnostic>) -> (i64, usize) {
+fn lex_char(
+    bytes: &[u8],
+    start: usize,
+    pos: SourcePos,
+    diags: &mut Vec<crate::Diagnostic>,
+) -> (i64, usize) {
     // bytes[start] is the opening quote.
     let err = |diags: &mut Vec<crate::Diagnostic>| {
-        diags.push(crate::Diagnostic::error("E-CHAR", "unterminated character literal", pos));
+        diags.push(crate::Diagnostic::error(
+            "E-CHAR",
+            "unterminated character literal",
+            pos,
+        ));
         (0, start + 1)
     };
     if start + 2 >= bytes.len() {
@@ -206,21 +248,33 @@ fn is_float_start(rest: &[u8]) -> bool {
 /// Scan an integer or floating literal. Returns a float token when the text
 /// carries a fraction, an exponent, or is inf/nan; everything else keeps the
 /// integer path (hex/binary included) so existing diagnostics are unchanged.
-fn lex_number_or_float(bytes: &[u8], start: usize, pos: SourcePos, diags: &mut Vec<crate::Diagnostic>) -> (Tok, usize) {
+fn lex_number_or_float(
+    bytes: &[u8],
+    start: usize,
+    pos: SourcePos,
+    diags: &mut Vec<crate::Diagnostic>,
+) -> (Tok, usize) {
     let mut i = start;
     if bytes[i] == b'+' || bytes[i] == b'-' {
         i += 1;
     }
     if is_float_start(&bytes[i..]) {
         if bytes[i] == b'i' {
-            let v = if bytes[start] == b'-' { f64::NEG_INFINITY } else { f64::INFINITY };
+            let v = if bytes[start] == b'-' {
+                f64::NEG_INFINITY
+            } else {
+                f64::INFINITY
+            };
             return (Tok::Float(v), i + 3);
         }
         return (Tok::Float(f64::NAN), i + 3);
     }
     // Hex/binary literals are always integers; plain decimal digits may
     // continue into a fraction/exponent.
-    if bytes[i] == b'0' && i + 1 < bytes.len() && ((bytes[i + 1] | 0x20) == b'x' || (bytes[i + 1] | 0x20) == b'b') {
+    if bytes[i] == b'0'
+        && i + 1 < bytes.len()
+        && ((bytes[i + 1] | 0x20) == b'x' || (bytes[i + 1] | 0x20) == b'b')
+    {
         let (v, next) = lex_number(bytes, start, pos, diags);
         return (Tok::Int(v), next);
     }
@@ -251,7 +305,11 @@ fn lex_number_or_float(bytes: &[u8], start: usize, pos: SourcePos, diags: &mut V
     }
     if i == digits_start {
         let text = std::str::from_utf8(&bytes[start..i]).unwrap_or("0");
-        diags.push(crate::Diagnostic::error("E-NUM", format!("invalid number '{text}'"), pos));
+        diags.push(crate::Diagnostic::error(
+            "E-NUM",
+            format!("invalid number '{text}'"),
+            pos,
+        ));
         return (Tok::Int(0), i);
     }
     let text = std::str::from_utf8(&bytes[start..i]).unwrap_or("0");
@@ -262,13 +320,22 @@ fn lex_number_or_float(bytes: &[u8], start: usize, pos: SourcePos, diags: &mut V
     match text.parse::<f64>() {
         Ok(v) => (Tok::Float(v), i),
         Err(_) => {
-            diags.push(crate::Diagnostic::error("E-NUM", format!("invalid number '{text}'"), pos));
+            diags.push(crate::Diagnostic::error(
+                "E-NUM",
+                format!("invalid number '{text}'"),
+                pos,
+            ));
             (Tok::Float(0.0), i)
         }
     }
 }
 
-fn lex_number(bytes: &[u8], start: usize, pos: SourcePos, diags: &mut Vec<crate::Diagnostic>) -> (i64, usize) {
+fn lex_number(
+    bytes: &[u8],
+    start: usize,
+    pos: SourcePos,
+    diags: &mut Vec<crate::Diagnostic>,
+) -> (i64, usize) {
     let mut i = start;
     if bytes[i] == b'+' || bytes[i] == b'-' {
         i += 1;
@@ -291,7 +358,11 @@ fn lex_number(bytes: &[u8], start: usize, pos: SourcePos, diags: &mut Vec<crate:
     }
     let text = std::str::from_utf8(&bytes[start..i]).unwrap_or("0");
     if i == digits_start {
-        diags.push(crate::Diagnostic::error("E-NUM", format!("invalid number '{text}'"), pos));
+        diags.push(crate::Diagnostic::error(
+            "E-NUM",
+            format!("invalid number '{text}'"),
+            pos,
+        ));
         return (0, i);
     }
     let (sign, body) = match text.strip_prefix('-') {
@@ -308,7 +379,11 @@ fn lex_number(bytes: &[u8], start: usize, pos: SourcePos, diags: &mut Vec<crate:
     let v = match parsed {
         Ok(n) => sign * n,
         Err(_) => {
-            diags.push(crate::Diagnostic::error("E-NUM", format!("invalid number '{text}'"), pos));
+            diags.push(crate::Diagnostic::error(
+                "E-NUM",
+                format!("invalid number '{text}'"),
+                pos,
+            ));
             0
         }
     };
@@ -321,7 +396,11 @@ mod tests {
     use crate::Severity;
 
     fn pos() -> SourcePos {
-        SourcePos { file: 0, line: 1, col: 0 }
+        SourcePos {
+            file: 0,
+            line: 1,
+            col: 0,
+        }
     }
 
     #[test]
@@ -330,7 +409,13 @@ mod tests {
         let toks = lex_line("loop: addi a0, a0, -1 # decrement", pos(), &mut d);
         assert!(d.is_empty());
         assert_eq!(toks.len(), 8);
-        assert_eq!(toks[0], Token { tok: Tok::Ident("loop".into()), pos: toks[0].pos });
+        assert_eq!(
+            toks[0],
+            Token {
+                tok: Tok::Ident("loop".into()),
+                pos: toks[0].pos
+            }
+        );
         assert_eq!(toks[1].tok, Tok::Colon);
         assert_eq!(toks[2].tok, Tok::Ident("addi".into()));
         assert_eq!(toks[7].tok, Tok::Int(-1));

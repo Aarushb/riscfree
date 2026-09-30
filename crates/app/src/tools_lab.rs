@@ -62,7 +62,11 @@ const KEYPAD: [[(&str, u8); 4]; 4] = [
 
 impl DigitalLabSim {
     #[allow(clippy::too_many_arguments)]
-    pub fn open(cmd_tx: Sender<Cmd>, listeners: crate::tools::MemoryListeners, display_tag: u32) -> Self {
+    pub fn open(
+        cmd_tx: Sender<Cmd>,
+        listeners: crate::tools::MemoryListeners,
+        display_tag: u32,
+    ) -> Self {
         let frame = Frame::builder()
             .with_title("Digital Lab Sim")
             .with_size(Size::new(560, 420))
@@ -78,10 +82,14 @@ impl DigitalLabSim {
             .build();
         sizer.add(&displays_label, 0, SizerFlag::All, 2);
 
-        let display1 = StaticText::builder(&panel).with_label("Display 1: blank").build();
+        let display1 = StaticText::builder(&panel)
+            .with_label("Display 1: blank")
+            .build();
         display1.set_accessibility_label("Display 1 state");
         sizer.add(&display1, 0, SizerFlag::All, 2);
-        let display2 = StaticText::builder(&panel).with_label("Display 2: blank").build();
+        let display2 = StaticText::builder(&panel)
+            .with_label("Display 2: blank")
+            .build();
         display2.set_accessibility_label("Display 2 state");
         sizer.add(&display2, 0, SizerFlag::All, 2);
 
@@ -140,11 +148,7 @@ pub struct InstructionCounter {
 }
 
 impl InstructionCounter {
-    pub fn open(
-        cmd_tx: Sender<Cmd>,
-        counts_listeners: CountsListeners,
-        tag: u32,
-    ) -> Self {
+    pub fn open(cmd_tx: Sender<Cmd>, counts_listeners: CountsListeners, tag: u32) -> Self {
         let frame = Frame::builder()
             .with_title("Instruction Counter")
             .with_size(Size::new(480, 520))

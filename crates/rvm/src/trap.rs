@@ -125,7 +125,14 @@ impl Machine {
     /// trap CSRs, stack `ustatus`, and redirect the pc. `uepc` is supplied by
     /// the caller (the not-yet-executed instruction for interrupts, the
     /// faulting one for exceptions).
-    pub(crate) fn take_trap(&mut self, cause: u32, tval: u64, interrupt: bool, uepc: u32, changes: &mut Vec<Change>) {
+    pub(crate) fn take_trap(
+        &mut self,
+        cause: u32,
+        tval: u64,
+        interrupt: bool,
+        uepc: u32,
+        changes: &mut Vec<Change>,
+    ) {
         use irq::*;
         self.journal.begin_statement();
         // Cause-specific consumption first so backstep can restore it.
@@ -171,7 +178,11 @@ impl Machine {
         let stacked = (st & !0x11) | ((st & 0x1) << 4);
         self.write_csr_raw(csr::USTATUS, stacked, changes);
         self.write_csr_raw(csr::UEPC, u64::from(uepc), changes);
-        let full_cause = if interrupt { u64::from(cause) | irq::INTERRUPT_BIT } else { u64::from(cause) };
+        let full_cause = if interrupt {
+            u64::from(cause) | irq::INTERRUPT_BIT
+        } else {
+            u64::from(cause)
+        };
         self.write_csr_raw(csr::UCAUSE, full_cause, changes);
         self.write_csr_raw(csr::UTVAL, tval, changes);
         self.journal.push(Undo::Pc { old: self.pc });
@@ -224,7 +235,9 @@ impl Machine {
                 self.skip_break_once = Some(self.pc);
                 self.terminated = None;
             }
-            Some(Halt::Watchpoint { .. }) | Some(Halt::Memcheck { .. }) | Some(Halt::CallingConvention { .. }) => {
+            Some(Halt::Watchpoint { .. })
+            | Some(Halt::Memcheck { .. })
+            | Some(Halt::CallingConvention { .. }) => {
                 self.terminated = None;
             }
             _ => {}
@@ -285,7 +298,10 @@ uret_slot:
         assert_eq!(events.last(), Some(&Event::Halted(Halt::Limit)));
         // uret restored UIE and set UPIE per the stacking rule.
         assert_eq!(m.csr(csr::USTATUS), 0x11);
-        assert_eq!(m.csr(csr::UCAUSE), irq::INTERRUPT_BIT | u64::from(irq::KEYBOARD));
+        assert_eq!(
+            m.csr(csr::UCAUSE),
+            irq::INTERRUPT_BIT | u64::from(irq::KEYBOARD)
+        );
         // pc is back at the interrupted instruction.
         assert_eq!(m.pc(), m.csr(csr::UEPC) as u32);
     }
@@ -305,7 +321,10 @@ uret_slot:
             let want = handler.wrapping_add(offset);
             assert_eq!(m.pc(), want, "mode bit {mode_bit}");
             assert_eq!(m.csr(csr::UEPC), u64::from(before + 4));
-            assert_eq!(m.csr(csr::UCAUSE), irq::INTERRUPT_BIT | u64::from(irq::KEYBOARD));
+            assert_eq!(
+                m.csr(csr::UCAUSE),
+                irq::INTERRUPT_BIT | u64::from(irq::KEYBOARD)
+            );
             assert_eq!(m.csr(csr::UTVAL), 0);
             // UIE stacked into UPIE, UIE cleared.
             assert_eq!(m.csr(csr::USTATUS), 0x10);
@@ -315,7 +334,8 @@ uret_slot:
     #[test]
     fn ustatus_stacks_through_uret() {
         let mut m = machine("    nop\n");
-        m.csrs.insert(csr::UTVEC, u64::from(m.program().text_base + 0x400));
+        m.csrs
+            .insert(csr::UTVEC, u64::from(m.program().text_base + 0x400));
         m.csrs.insert(csr::USTATUS, 1);
         m.software_pending = true;
         m.step(); // nop retires; the software interrupt traps
@@ -503,7 +523,10 @@ uret_slot:
         // handler, before any handler instruction runs.
         assert_eq!(events.last(), Some(&Event::Halted(Halt::Breakpoint)));
         assert_eq!(m.pc(), handler);
-        assert_eq!(m.csr(csr::UCAUSE), irq::INTERRUPT_BIT | u64::from(irq::KEYBOARD));
+        assert_eq!(
+            m.csr(csr::UCAUSE),
+            irq::INTERRUPT_BIT | u64::from(irq::KEYBOARD)
+        );
         // Continue from the stop: the handler runs to completion.
         m.continue_after_stop();
         assert!(!m.is_terminated());
@@ -541,7 +564,10 @@ handler:
     fn sync_exception_halts_without_utvec_and_marks_terminated() {
         let mut m = machine("    li t0, 8\n    lw a0, 0(t0)\n");
         let events = m.run(None);
-        assert!(matches!(events.last(), Some(Event::Halted(Halt::Error { .. }))));
+        assert!(matches!(
+            events.last(),
+            Some(Event::Halted(Halt::Error { .. }))
+        ));
         // The stop is visible through the machine state, like other halts.
         assert!(m.is_terminated());
         assert!(matches!(m.halt_reason(), Some(Halt::Error { .. })));
@@ -554,18 +580,21 @@ handler:
         let mut m = machine("    nop\n");
         let base = m.program().text_base;
         m.csrs.insert(csr::UTVEC, u64::from(base + 0x400));
-        m.pc = base + 2;
+        m.pc = base + 3;
         m.step();
         assert_eq!(m.pc(), base + 0x400);
         assert_eq!(m.csr(csr::UCAUSE), 0);
-        assert_eq!(m.csr(csr::UEPC), u64::from(base + 2));
-        assert_eq!(m.csr(csr::UTVAL), u64::from(base + 2));
+        assert_eq!(m.csr(csr::UEPC), u64::from(base + 3));
+        assert_eq!(m.csr(csr::UTVAL), u64::from(base + 3));
         assert!(!m.is_terminated());
 
         let mut m = machine("    nop\n");
         m.pc = m.program().text_base + 2;
         let out = m.step();
-        assert!(matches!(out.events.last(), Some(Event::Halted(Halt::Error { .. }))));
+        assert!(matches!(
+            out.events.last(),
+            Some(Event::Halted(Halt::Error { .. }))
+        ));
         assert!(m.is_terminated());
     }
 
@@ -595,6 +624,3 @@ handler:
         assert_eq!(m.csr(csr::UEPC), u64::from(m.program().text_base + 4));
     }
 }
-
-
-
