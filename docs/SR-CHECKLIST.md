@@ -9,6 +9,7 @@ not done while any box is unchecked.
 - [ ] App launches with NVDA running; focus lands in the editor and the window name is announced.
 - [ ] Tab order: toolbar buttons, editor, state notebook tabs, register list, program list, memory pane, Run I/O output, program input, Send.
 - [ ] Editor: typing is echoed; arrowing through lines reads code; line numbers do not pollute speech; error markers are perceivable (via the Assembler Messages route).
+- [ ] Editor: Tab and Shift+Tab move focus out of and back into the editor; Ctrl+Tab inserts a tab character (standard multiline-edit convention).
 - [ ] Assemble with a deliberate error: brief announcement says "Assembly failed, N errors"; the Assembler Messages list reads severity, location, and message per row; Enter jumps the editor to the line.
 - [ ] Assemble clean: announcement "Assembled, N instructions, no errors."
 - [ ] F5 runs a printing program; output lands in the read-only Run I/O control and is traversable by line; the input line accepts text and Send forwards it to a reading program.
