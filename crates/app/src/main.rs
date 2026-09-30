@@ -9,6 +9,7 @@
 
 mod bridge;
 mod tools;
+mod tools_float;
 
 #[cfg(target_os = "windows")]
 use wxdragon::accessible::AccRole;
@@ -39,6 +40,7 @@ const ID_RUN_RESET: Id = 2007;
 const ID_RUN_TOGGLE_BREAK: Id = 2009;
 const ID_SHORTCUTS: Id = 3001;
 const ID_TOOL_BITMAP: Id = 4001;
+const ID_TOOL_FLOAT: Id = 4002;
 const ID_ABOUT: Id = 3002;
 
 const SAMPLE_RISCV: &str = "\
@@ -681,6 +683,7 @@ fn build_menu_bar() -> MenuBar {
 
     let tools_menu = Menu::builder()
         .append_item(ID_TOOL_BITMAP, "&Bitmap Display", "Watch memory as a pixel grid, with a textual view of every row")
+        .append_item(ID_TOOL_FLOAT, "Float &Representation", "Convert between raw bits and float values")
         .build();
 
     let help_menu = Menu::builder()
@@ -1061,6 +1064,9 @@ fn bind_menu_events(
             ID_RUN_STOP => { tx.send(Cmd::Pause).ok(); }
             ID_RUN_RESET => { tx.send(Cmd::Reset).ok(); }
             ID_RUN_TOGGLE_BREAK => toggle_selected_breakpoint(&w, &tx),
+            ID_TOOL_FLOAT => {
+                tools_float::FloatRepTool::open();
+            }
             ID_TOOL_BITMAP => {
                 let tag = tools::next_tag(&listener_tags);
                 let listeners = memory_listeners.clone();
