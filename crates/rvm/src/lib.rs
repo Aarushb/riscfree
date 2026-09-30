@@ -1796,6 +1796,30 @@ ecall
     }
 
     #[test]
+    fn compressed_backward_branch_and_jump() {
+        // Backward c.bnez and c.j offsets are sign-extended; before the fix
+        // a taken backward transfer ran off the end of the text segment.
+        let src = "    j start
+finish:
+    c.li a0, 5
+    c.li a7, 1
+    ecall
+    c.li a7, 10
+    ecall
+start:
+    c.li s0, 3
+count:
+    c.addi s0, -1
+    c.bnez s0, count
+    c.j finish
+";
+        let mut m = machine_c(src);
+        m.run(None);
+        assert_eq!(m.exit_code(), Some(0));
+        assert_eq!(m.reg(10), 5);
+    }
+
+    #[test]
     fn compressed_doubleword_sp_roundtrip() {
         // RV64: c.sdsp/c.ldsp move a 64-bit value through the stack slot.
         let src = "\
