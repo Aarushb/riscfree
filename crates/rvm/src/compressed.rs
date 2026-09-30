@@ -198,11 +198,12 @@ pub fn expand_compressed(word: u16, rv64: bool) -> Option<u32> {
                     }
                 }
                 0x4 => {
-                    let rd_slice = bits(word, 11, 7);
-                    let rd = rd_slice + 8;
+                    // In this group rd' sits at [9:7]; bits [11:10] are the
+                    // opcode selector, so they must not be folded into rd.
+                    let rd = bits(word, 9, 7) + 8;
                     match bits(word, 11, 10) {
                         0x0 | 0x1 => {
-                            // c.srli / c.srai
+                            // c.srli / c.srai: shamt at [12]+[6:2].
                             let shamt = (bits(word, 12, 12) << 5) | bits(word, 6, 2);
                             if shamt == 0 {
                                 return None;
@@ -226,8 +227,21 @@ pub fn expand_compressed(word: u16, rv64: bool) -> Option<u32> {
                             Some(i_type(0x7, rd, rd, imm as u32))
                         }
                         _ => {
-                            let rs2 = bits(word, 6, 2) + 8;
-                            let (funct7, funct3) = match bits(word, 6, 5) {
+                            // c.sub/c.xor/c.or/c.and: funct2 at [6:5], rs2'
+                            // at [4:2]. On RV64 bit12=1 selects c.subw/c.addw
+                            // (word-width variants, opcode 0x3b).
+                            let rs2 = bits(word, 4, 2) + 8;
+                            let funct2 = bits(word, 6, 5);
+                            if bits(word, 12, 12) == 1 {
+                                let funct7 = if funct2 == 0 { 0x20 } else { 0x00 };
+                                return Some(
+                                    0x3b | (funct7 << 25)
+                                        | (rs2 << 20)
+                                        | (rd << 15)
+                                        | (rd << 7),
+                                );
+                            }
+                            let (funct7, funct3) = match funct2 {
                                 0x0 => (0x20, 0x0),
                                 0x1 => (0x00, 0x4),
                                 0x2 => (0x00, 0x6),
