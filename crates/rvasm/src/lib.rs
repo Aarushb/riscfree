@@ -9,7 +9,7 @@ mod asm;
 mod encode;
 mod lexer;
 
-pub use encode::InstructionInfo;
+pub use encode::{opcode_representative, InstructionInfo};
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -124,6 +124,11 @@ pub struct Program {
     pub statements: Vec<Statement>,
     pub data: DataImage,
     pub symbols: SymbolTable,
+    /// `.extern name size` reservations as (address, zero bytes). An extern
+    /// symbol is a label over zeroed memory, not an initializer: no bytes are
+    /// emitted for it beyond this zero fill, which rvm writes at load so the
+    /// reserved region exists in the image like RARS's extern segment.
+    pub extern_chunks: Vec<(u32, Vec<u8>)>,
     /// Original source lines, indexed by `FileId` then line (0-based).
     pub sources: Vec<Arc<str>>,
     pub file_names: Vec<String>,
@@ -146,6 +151,10 @@ impl Program {
 pub struct AsmConfig {
     pub text_base: u32,
     pub data_base: u32,
+    /// Base of the extern region where `.extern name size` reserves space.
+    /// RARS puts the extern segment at the data-segment base, just below the
+    /// static data this config's `data_base` points at.
+    pub extern_base: u32,
     /// When false, pseudo-instructions are rejected like RARS's `np` flag.
     pub allow_pseudo: bool,
     /// Assemble for RV64 (RARS's 64-bit setting; the default is RV32, as in
@@ -159,7 +168,13 @@ pub struct AsmConfig {
 
 impl Default for AsmConfig {
     fn default() -> Self {
-        AsmConfig { text_base: 0x0040_0000, data_base: 0x1001_0000, allow_pseudo: true, rv64: false }
+        AsmConfig {
+            text_base: 0x0040_0000,
+            data_base: 0x1001_0000,
+            extern_base: 0x1000_0000,
+            allow_pseudo: true,
+            rv64: false,
+        }
     }
 }
 

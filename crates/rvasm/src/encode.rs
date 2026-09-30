@@ -310,6 +310,15 @@ pub fn lookup(name: &str) -> Option<&'static InstructionInfo> {
     INSTRUCTIONS.iter().find(|i| i.name == name)
 }
 
+/// A representative mnemonic for an opcode field value, for tools that group
+/// execution counts by opcode (several instructions share one opcode).
+pub fn opcode_representative(opcode: u32) -> Option<&'static str> {
+    INSTRUCTIONS
+        .iter()
+        .find(|i| i.opcode == opcode && !i.rv64_only)
+        .map(|i| i.name)
+}
+
 fn enc_r(info: &InstructionInfo, rd: u32, rs1: u32, rs2: u32) -> u32 {
     (info.funct7 & 0x7f) << 25
         | (rs2 & 0x1f) << 20

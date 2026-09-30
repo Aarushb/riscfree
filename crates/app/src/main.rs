@@ -10,6 +10,7 @@
 mod bridge;
 mod tools;
 mod tools_float;
+mod tools_lab;
 
 #[cfg(target_os = "windows")]
 use wxdragon::accessible::AccRole;
@@ -41,6 +42,8 @@ const ID_RUN_TOGGLE_BREAK: Id = 2009;
 const ID_SHORTCUTS: Id = 3001;
 const ID_TOOL_BITMAP: Id = 4001;
 const ID_TOOL_FLOAT: Id = 4002;
+const ID_TOOL_LAB: Id = 4003;
+const ID_TOOL_COUNTER: Id = 4004;
 const ID_ABOUT: Id = 3002;
 
 const SAMPLE_RISCV: &str = "\
@@ -176,6 +179,8 @@ fn main() {
         let (input_tx, input_rx) = std::sync::mpsc::channel::<String>();
         let input: InputChannel = std::sync::Arc::new(std::sync::Mutex::new(input_rx));
         let memory_listeners: tools::MemoryListeners = Rc::new(std::cell::RefCell::new(Vec::new()));
+        let counts_listeners: tools_lab::CountsListeners =
+            Rc::new(std::cell::RefCell::new(Vec::new()));
         let listener_tags = Rc::new(std::cell::RefCell::new(1u32)); // tag 0 = Memory tab
         std::thread::Builder::new()
             .name("sim".into())
@@ -353,6 +358,7 @@ fn main() {
             &narrator,
             &cmd_tx,
             &memory_listeners,
+            &counts_listeners,
             &listener_tags,
         );
 
@@ -368,14 +374,26 @@ fn main() {
             let nar = narrator.clone();
             let tx = cmd_tx.clone();
             let listeners = memory_listeners.clone();
+            let counts_listeners = counts_listeners.clone();
             frame.on_idle(move |idle| {
                 if let WindowEventData::Idle(idle) = idle {
                     idle.request_more(true);
                 }
                 std::thread::sleep(std::time::Duration::from_millis(5));
                 while let Ok(evt) = evt_rx.try_recv() {
-                    if !tools::route_memory_event(&listeners, &evt) {
-                        handle_sim_event(&w, &sh, &nar, &tx, evt);
+                    match evt {
+                        Evt::Counts { counts, tag } => {
+                            for (listener_tag, listener) in counts_listeners.borrow().iter() {
+                                if *listener_tag == tag {
+                                    listener(&counts);
+                                }
+                            }
+                        }
+                        other => {
+                            if !tools::route_memory_event(&listeners, &other) {
+                                handle_sim_event(&w, &sh, &nar, &tx, other);
+                            }
+                        }
                     }
                 }
             });
@@ -543,7 +561,8 @@ fn handle_sim_event(
             w.io_output.append_text(&text);
         }
         Evt::State(snapshot) => {
-            let bridge::StateSnapshot { regs, fregs, pc, instret } = *snapshot;
+            let bridge::StateSnapshot { regs, fregs, displays, pc, instret } = *snapshot;
+            DISPLAYS.with(|d| *d.borrow_mut() = displays);
             refresh_registers(w, &regs);
             refresh_fp_registers(w, &fregs);
             mark_program_pc(w, pc);
@@ -551,13 +570,20 @@ fn handle_sim_event(
             let base = *shared.memory_base.borrow();
             tx.send(Cmd::ReadMemory { addr: base, len: 512, tag: 0 }).ok();
         }
-        Evt::Memory { base, bytes, tag: _ } => {
-            rebuild_memory_rows(base, &bytes);
-            let count = MEMORY_ROWS.with(|rows| rows.borrow().len() as i64);
-            w.memory_list.set_item_count(count);
-            if count > 0 {
-                w.memory_list.refresh_items(0, count - 1);
+        Evt::Memory { base, bytes, tag } => {
+            // Tag 0 is the Memory tab; other tags route to their tools in
+            // the pump before this handler runs.
+            if tag == 0 {
+                rebuild_memory_rows(base, &bytes);
+                let count = MEMORY_ROWS.with(|rows| rows.borrow().len() as i64);
+                w.memory_list.set_item_count(count);
+                if count > 0 {
+                    w.memory_list.refresh_items(0, count - 1);
+                }
             }
+        }
+        Evt::Counts { .. } => {
+            // Routed to the Instruction Counter tool by the pump.
         }
         Evt::Stepped { text, line, changes, pc, instret } => {
             w.status_bar.set_status_text(&format!("line {line}, pc 0x{pc:08x}, {instret} executed"), 1);
@@ -633,6 +659,9 @@ thread_local! {
     static MEMORY_ROWS: RefCell<Vec<[String; 3]>> = const { RefCell::new(Vec::new()) };
     /// Backing rows for the Floating Point tab.
     static FP_ROWS: RefCell<Vec<[String; 5]>> = const { RefCell::new(Vec::new()) };
+    /// Latest seven-segment display register bytes, for the Digital Lab Sim
+    /// tool's display refresh.
+    static DISPLAYS: RefCell<[u8; 2]> = const { RefCell::new([0; 2]) };
 }
 
 const ABI: &[&str] = &[
@@ -684,6 +713,8 @@ fn build_menu_bar() -> MenuBar {
     let tools_menu = Menu::builder()
         .append_item(ID_TOOL_BITMAP, "&Bitmap Display", "Watch memory as a pixel grid, with a textual view of every row")
         .append_item(ID_TOOL_FLOAT, "Float &Representation", "Convert between raw bits and float values")
+        .append_item(ID_TOOL_LAB, "&Digital Lab Sim", "Seven segment displays and a hex keypad your program controls")
+        .append_item(ID_TOOL_COUNTER, "Instruction &Counter", "Executed instruction counts grouped by opcode")
         .build();
 
     let help_menu = Menu::builder()
@@ -989,9 +1020,11 @@ fn bind_menu_events(
     narrator: &std::rc::Rc<Narrator>,
     cmd_tx: &Sender<Cmd>,
     memory_listeners: &tools::MemoryListeners,
+    counts_listeners: &tools_lab::CountsListeners,
     listener_tags: &std::rc::Rc<std::cell::RefCell<u32>>,
 ) {
     let memory_listeners = std::rc::Rc::clone(memory_listeners);
+    let counts_listeners = std::rc::Rc::clone(counts_listeners);
     let listener_tags = std::rc::Rc::clone(listener_tags);
     let fr = widgets.frame;
     let w = widgets.clone();
@@ -1066,6 +1099,21 @@ fn bind_menu_events(
             ID_RUN_TOGGLE_BREAK => toggle_selected_breakpoint(&w, &tx),
             ID_TOOL_FLOAT => {
                 tools_float::FloatRepTool::open();
+            }
+            ID_TOOL_LAB => {
+                let tag = tools::next_tag(&listener_tags);
+                let listeners = memory_listeners.clone();
+                let tx2 = tx.clone();
+                tools_lab::DigitalLabSim::open(tx2, listeners, tag);
+                // One read to paint the initial display state; the listener
+                // also refreshes on every later tagged read.
+                tx.send(Cmd::ReadMemory { addr: 0xffff_0000, len: 0x16, tag }).ok();
+            }
+            ID_TOOL_COUNTER => {
+                let tag = tools::next_tag(&listener_tags);
+                let counts = counts_listeners.clone();
+                let tx2 = tx.clone();
+                tools_lab::InstructionCounter::open(tx2, counts, tag);
             }
             ID_TOOL_BITMAP => {
                 let tag = tools::next_tag(&listener_tags);

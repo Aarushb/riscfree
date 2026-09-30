@@ -40,6 +40,36 @@ impl Default for MemLayout {
     }
 }
 
+impl MemLayout {
+    /// The layout family this matches, for UI labels. Returns "Custom" when
+    /// the bases were hand-edited away from a preset.
+    pub fn name(&self) -> &'static str {
+        match (self.text_base, self.data_base) {
+            (0x0040_0000, 0x1000_0000) => "Default",
+            (0x0040_0000, 0x0000_0000) => "CompactDataAtZero",
+            (0x0000_0000, 0x1000_0000) => "CompactTextAtZero",
+            _ => "Custom",
+        }
+    }
+
+    /// RARS's `CompactDataAtZero` setting: the data segment starts at
+    /// address 0 and text stays at 0x00400000. Static and heap data keep
+    /// their Default offsets from the segment base (static = data_base +
+    /// 0x10000, heap = data_base + 0x40000), so the matching assembler
+    /// config is `AsmConfig { data_base: 0x0001_0000, .. }`.
+    pub fn compact_data_at_zero() -> Self {
+        MemLayout { data_base: 0x0000_0000, heap_base: 0x0004_0000, ..MemLayout::default() }
+    }
+
+    /// RARS's `CompactTextAtZero` setting: text at address 0 and the data
+    /// segment at its Default base 0x10000000 (assembler `data_base` stays
+    /// 0x10010000). Course programs that assume a zero-based text segment
+    /// need this so fetches and breakpoint addresses line up.
+    pub fn compact_text_at_zero() -> Self {
+        MemLayout { text_base: 0x0000_0000, ..MemLayout::default() }
+    }
+}
+
 #[derive(Debug)]
 pub enum MemError {
     /// Address outside every mapped segment.
@@ -152,5 +182,47 @@ mod tests {
     fn unwritten_reads_zero() {
         let m = Memory::default();
         assert_eq!(m.read_u64(0x7fff_ff00).unwrap(), 0);
+    }
+
+    #[test]
+    fn default_preset_keeps_rars_layout() {
+        let l = MemLayout::default();
+        assert_eq!(l.name(), "Default");
+        assert_eq!(l.text_base, 0x0040_0000);
+        assert_eq!(l.text_len, 4 * 1024 * 1024);
+        assert_eq!(l.data_base, 0x1000_0000);
+        assert_eq!(l.heap_base, 0x1004_0000);
+        assert_eq!(l.stack_top, 0x7fff_fffc);
+        assert_eq!(l.mmio_base, 0xffff_0000);
+    }
+
+    #[test]
+    fn compact_data_preset_moves_data_segment_to_zero() {
+        let l = MemLayout::compact_data_at_zero();
+        assert_eq!(l.name(), "CompactDataAtZero");
+        // Text stays at its Default base; the data segment base moves to 0
+        // and heap keeps its Default offset from the segment base.
+        assert_eq!(l.text_base, 0x0040_0000);
+        assert_eq!(l.data_base, 0x0000_0000);
+        assert_eq!(l.heap_base, 0x0004_0000);
+        // Everything outside the data segment is unchanged.
+        assert_eq!(l.stack_top, MemLayout::default().stack_top);
+        assert_eq!(l.mmio_base, MemLayout::default().mmio_base);
+    }
+
+    #[test]
+    fn compact_text_preset_moves_text_to_zero() {
+        let l = MemLayout::compact_text_at_zero();
+        assert_eq!(l.name(), "CompactTextAtZero");
+        assert_eq!(l.text_base, 0x0000_0000);
+        // The data segment sits at the Default base.
+        assert_eq!(l.data_base, 0x1000_0000);
+        assert_eq!(l.heap_base, 0x1004_0000);
+    }
+
+    #[test]
+    fn hand_edited_bases_report_custom() {
+        let l = MemLayout { text_base: 0x0030_0000, ..MemLayout::default() };
+        assert_eq!(l.name(), "Custom");
     }
 }

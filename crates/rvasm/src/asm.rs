@@ -68,6 +68,10 @@ struct Assembler {
     raw: Vec<RawInstr>,
     data: Vec<u8>,
     data_relocs: Vec<(u32, String, SourcePos)>, // (offset in data, label, pos)
+    /// `.extern` reservations as (address, zero bytes); the cursor lives in
+    /// `extern_next`, independent of the segment cursors.
+    extern_chunks: Vec<(u32, Vec<u8>)>,
+    extern_next: u32,
     text_addr: u32,
     data_addr: u32,
     segment: Segment,
@@ -93,6 +97,8 @@ pub fn assemble_impl(files: &[InputFile], cfg: &AsmConfig) -> AsmResult {
         raw: Vec::new(),
         data: Vec::new(),
         data_relocs: Vec::new(),
+        extern_chunks: Vec::new(),
+        extern_next: cfg.extern_base,
         text_addr: cfg.text_base,
         data_addr: cfg.data_base,
         segment: Segment::Text,
@@ -643,7 +649,50 @@ impl Assembler {
             ".macro" => self.err("E-DIRECTIVE", "'.macro' must be the first token on its line", pos),
             ".end_macro" => self.err("E-DIRECTIVE", "'.end_macro' without a matching .macro", pos),
             ".include" => self.err("E-UNSUPPORTED", ".include lands in phase 1", pos),
-            ".extern" => self.err("E-UNSUPPORTED", ".extern lands in phase 1", pos),
+            // `.extern name size` reserves `size` bytes at the head of the
+            // data segment (RARS's extern segment) and defines `name` there.
+            // The cursor is independent of the segment selectors, so the
+            // directive is legal in .text and .data alike.
+            ".extern" => {
+                let Some(Token { tok: Tok::Ident(name), .. }) = rest.first() else {
+                    self.err("E-DIRECTIVE", ".extern needs a name", pos);
+                    return;
+                };
+                let name = name.clone();
+                let Some(Token { tok: Tok::Int(size), .. }) = rest.get(1) else {
+                    self.err("E-DIRECTIVE", ".extern needs a byte count", pos);
+                    return;
+                };
+                if *size < 1 || *size > u32::MAX as i64 {
+                    self.err(
+                        "E-DIRECTIVE",
+                        format!(".extern reservation must be at least 1 byte, found {size}"),
+                        pos,
+                    );
+                    return;
+                }
+                if let Some(extra) = rest.get(2) {
+                    self.err("E-DIRECTIVE", "unexpected tokens after the .extern size", extra.pos);
+                    return;
+                }
+                let Some(addr) = self.extern_next.checked_add(*size as u32) else {
+                    self.err("E-DIRECTIVE", ".extern reservation overflows the address space", pos);
+                    return;
+                };
+                // A duplicate reports E-DUP-SYM from `define` and allocates
+                // nothing new.
+                let is_new = self.symbols.get(&name).is_none();
+                // RARS declares extern symbols global.
+                self.symbols.define(
+                    name,
+                    Symbol { addr: self.extern_next, global: true, source: pos },
+                    &mut self.diags,
+                );
+                if is_new {
+                    self.extern_chunks.push((self.extern_next, vec![0; *size as u32 as usize]));
+                    self.extern_next = addr;
+                }
+            }
             other => self.err("E-DIRECTIVE", format!("unknown directive '{other}'"), pos),
         }
     }
@@ -959,6 +1008,7 @@ impl Assembler {
             text_base: self.cfg.text_base,
             statements,
             data: DataImage { base: self.cfg.data_base, bytes: std::mem::take(&mut self.data) },
+            extern_chunks: std::mem::take(&mut self.extern_chunks),
             symbols: std::mem::take(&mut self.symbols),
             sources: std::mem::take(&mut self.sources),
             file_names: std::mem::take(&mut self.file_names),
@@ -1865,5 +1915,93 @@ mod tests {
             assert_eq!(a.encoding, b.encoding);
             assert_eq!(a.basic_text, b.basic_text);
         }
+    }
+
+    // ---- .extern ----
+
+    #[test]
+    fn extern_symbols_reserve_and_advance() {
+        // Each reservation starts where the previous one ended, and the
+        // zero-filled chunks carry the layout without touching the data
+        // image.
+        let r = asm(".extern a 4\n.extern b 12\n");
+        assert!(!r.has_errors(), "diags: {:?}", r.diagnostics);
+        let p = r.program.unwrap();
+        assert_eq!(p.symbols.get("a").unwrap().addr, 0x1000_0000);
+        assert_eq!(p.symbols.get("b").unwrap().addr, 0x1000_0004);
+        assert_eq!(p.extern_chunks.len(), 2);
+        assert_eq!(p.extern_chunks[0].0, 0x1000_0000);
+        assert_eq!(p.extern_chunks[0].1, vec![0u8; 4]);
+        assert_eq!(p.extern_chunks[1].0, 0x1000_0004);
+        assert_eq!(p.extern_chunks[1].1, vec![0u8; 12]);
+        assert!(p.data.bytes.is_empty());
+    }
+
+    #[test]
+    fn extern_symbols_are_global() {
+        // RARS declares extern symbols global.
+        let r = asm(".extern shared 4\n");
+        assert!(!r.has_errors());
+        assert!(r.program.unwrap().symbols.get("shared").unwrap().global);
+    }
+
+    #[test]
+    fn extern_works_from_any_segment() {
+        // The extern cursor is independent of .text/.data placement and the
+        // static data cursor is unaffected.
+        let r = asm(".text\n.extern var 4\nnop\n.data\nx: .word 1\n");
+        assert!(!r.has_errors(), "diags: {:?}", r.diagnostics);
+        let p = r.program.unwrap();
+        assert_eq!(p.symbols.get("var").unwrap().addr, 0x1000_0000);
+        assert_eq!(p.symbols.get("x").unwrap().addr, 0x1001_0000);
+        assert_eq!(p.data.bytes, 1u32.to_le_bytes().to_vec());
+    }
+
+    #[test]
+    fn extern_redefine_is_duplicate_symbol_error() {
+        let r = asm(".extern a 4\n.extern a 8\n");
+        assert!(r.has_errors());
+        assert!(r.diagnostics.iter().any(|d| d.code == "E-DUP-SYM"));
+        // A label over the same name collides too.
+        let r = asm(".extern a 4\na: .word 1\n");
+        assert!(r.has_errors());
+        assert!(r.diagnostics.iter().any(|d| d.code == "E-DUP-SYM"));
+    }
+
+    #[test]
+    fn extern_size_must_be_positive() {
+        for src in [".extern a\n", ".extern a 0\n", ".extern a -4\n", ".extern 8\n"] {
+            let r = asm(src);
+            assert!(r.has_errors(), "should reject: {src}");
+            assert!(
+                r.diagnostics.iter().any(|d| d.code == "E-DIRECTIVE"),
+                "want E-DIRECTIVE for {src}"
+            );
+        }
+    }
+
+    #[test]
+    fn extern_label_form_access_resolves() {
+        // Programs address extern symbols like any other label: la/lw/sw
+        // expand and resolve against the extern addresses.
+        let r = asm(".extern var 4\n.text\nla t0, var\nlw a0, var\nsw a0, var\n");
+        assert!(!r.has_errors(), "diags: {:?}", r.diagnostics);
+        let p = r.program.unwrap();
+        // la expands to lui+addi and each label-form access to lui+load/store.
+        assert_eq!(p.statements.len(), 6);
+        // lui t0, %hi(0x10000000) = 0x10000: 0x10000 << 12 | rd t0(5) << 7 | op.
+        assert_eq!(p.statements[0].encoding, 0x1000_02b7);
+        assert_eq!(p.statements[1].basic_text.as_ref(), "addi t0, t0, %lo(var)");
+    }
+
+    #[test]
+    fn extern_base_follows_config() {
+        let files = vec![InputFile { name: "t.s".into(), source: ".extern a 4\n".into() }];
+        let cfg = AsmConfig { extern_base: 0x2000_0000, ..AsmConfig::default() };
+        let r = crate::assemble(&files, &cfg);
+        assert!(!r.has_errors());
+        let p = r.program.unwrap();
+        assert_eq!(p.symbols.get("a").unwrap().addr, 0x2000_0000);
+        assert_eq!(p.extern_chunks[0].0, 0x2000_0000);
     }
 }

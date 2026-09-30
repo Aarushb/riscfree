@@ -11,12 +11,13 @@ mod syscalls;
 mod trap;
 
 pub use host::{Host, ScriptHost, StdHost};
+pub use memory::MemLayout;
 pub use trap::irq;
 
-use crate::memory::{MemError, MemLayout, Memory};
+use crate::memory::{MemError, Memory};
 use crate::mmio::Mmio;
 use rvasm::Program;
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 /// Machine-level settings.
 #[derive(Debug, Clone, Default)]
@@ -99,9 +100,10 @@ impl StepOutcome {
 #[derive(Debug, Clone, Copy)]
 enum Undo {
     Boundary,
-    /// Marker that this statement retired an instruction (backstep only
-    /// rewinds `instret` for those; traps and parked wfis do not).
-    Retired,
+    /// Marker that this statement retired an instruction, carrying the
+    /// opcode (encoding bits 6:0) so backstep rewinds `instret` and the
+    /// per-opcode counters together. Traps and parked wfis do not retire.
+    Retired { opcode: u32 },
     Reg { index: usize, old: u64 },
     FReg { index: usize, old: u64 },
     Csr { id: u16, old: u64 },
@@ -113,6 +115,8 @@ enum Undo {
     XmitEdge,
     /// A trap cleared the software request; undo re-raises it.
     SoftwareIrq,
+    /// A trap consumed the keypad request; undo re-raises it.
+    HexKeys,
     /// `wfi` parked the hart; undo un-parks.
     Waiting { old: bool },
 }
@@ -170,6 +174,10 @@ pub struct Machine {
     pub(crate) instret: u64,
     /// Hart parked in `wfi` (no deliverable interrupt).
     pub(crate) waiting: bool,
+    /// Retired-instruction counts by opcode (encoding bits 6:0) for the
+    /// Instruction Counter tool view. Kept in lockstep with `instret`, so
+    /// the counts always sum to it.
+    pub(crate) opcode_counts: BTreeMap<u32, u64>,
     /// Armed timer period in retired instructions (None = disarmed).
     pub(crate) timer_interval: Option<u64>,
     /// instret value at which the armed timer next fires.
@@ -246,6 +254,7 @@ impl Machine {
             terminated: None,
             instret: 0,
             waiting: false,
+            opcode_counts: BTreeMap::new(),
             timer_interval: None,
             timer_deadline: 0,
             software_pending: false,
@@ -263,6 +272,12 @@ impl Machine {
         }
         if !self.program.data.bytes.is_empty() {
             self.mem.write_bytes(self.program.data.base, &self.program.data.bytes);
+        }
+        // `.extern` reservations: zero-fill the reserved regions so the
+        // addresses the symbols point at exist in the image (they read zero
+        // until the program stores into them).
+        for (addr, bytes) in &self.program.extern_chunks {
+            self.mem.write_bytes(*addr, bytes);
         }
     }
 
@@ -292,6 +307,13 @@ impl Machine {
 
     pub fn instret(&self) -> u64 {
         self.instret
+    }
+
+    /// Retired-instruction counts grouped by opcode (encoding bits 6:0),
+    /// sorted by opcode — the Instruction Counter / Statistics tool view.
+    /// Always sums to `instret()`: both rewind together on backstep.
+    pub fn opcode_counts(&self) -> Vec<(u32, u64)> {
+        self.opcode_counts.iter().map(|(op, n)| (*op, *n)).collect()
     }
 
     pub fn exit_code(&self) -> Option<i32> {
@@ -407,11 +429,16 @@ impl Machine {
             self.journal.push(Undo::Waiting { old: false });
             return outcome.outcome;
         }
-        // The instruction retired even when it halted the machine (an exit
-        // ecall, for instance); RARS counts it.
+        // Count the instruction when it actually retired. Halting
+        // instructions (the exit ecall, ebreak) report executed:false and
+        // retire nothing, so the per-opcode counts stay a partition of
+        // instret — the opcode rides the Retired record so backstep rewinds
+        // both together.
         if outcome.outcome.executed {
             self.instret += 1;
-            self.journal.push(Undo::Retired);
+            let opcode = word & 0x7f;
+            *self.opcode_counts.entry(opcode).or_insert(0) += 1;
+            self.journal.push(Undo::Retired { opcode });
         }
         if outcome.terminated_now {
             // Synchronous exceptions (address faults, illegal instructions)
@@ -514,8 +541,12 @@ impl Machine {
             return false;
         };
         // Only statements that retired an instruction rewind the counter;
-        // trap entries and parked wfis never incremented it.
-        let retired = recs.iter().any(|r| matches!(r, Undo::Retired));
+        // trap entries and parked wfis never incremented it. The opcode
+        // comes along so its per-opcode count rewinds with instret.
+        let retired_opcode = recs.iter().find_map(|r| match r {
+            Undo::Retired { opcode } => Some(*opcode),
+            _ => None,
+        });
         for rec in recs {
             match rec {
                 Undo::Reg { index, old } => {
@@ -537,13 +568,19 @@ impl Machine {
                 Undo::TimerDeadline { old } => self.timer_deadline = old,
                 Undo::XmitEdge => self.mmio.restore_xmit_edge(),
                 Undo::SoftwareIrq => self.software_pending = true,
+                Undo::HexKeys => self.mmio.keys_pending = true,
                 Undo::Waiting { old } => self.waiting = old,
-                Undo::Retired | Undo::Boundary => {}
+                Undo::Retired { .. } | Undo::Boundary => {}
             }
         }
         self.terminated = None;
-        if retired {
+        if let Some(opcode) = retired_opcode {
             self.instret = self.instret.saturating_sub(1);
+            let count = self.opcode_counts.entry(opcode).or_insert(0);
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                self.opcode_counts.remove(&opcode);
+            }
         }
         true
     }
@@ -563,6 +600,7 @@ impl Machine {
         self.journal.records.clear();
         self.terminated = None;
         self.instret = 0;
+        self.opcode_counts.clear();
         self.waiting = false;
         self.software_pending = false;
         self.skip_break_once = None;
@@ -1029,6 +1067,159 @@ loop:
         assert_eq!(&buf, b"barbaz\0");
         // Strings and the pointer array live below the initial $sp.
         assert!(strings.iter().chain(&[argv]).all(|a| *a < 0x7fff_fffc));
+    }
+
+    // ---- .extern reservations ----
+
+    #[test]
+    fn extern_reservations_map_into_memory() {
+        // .extern reserves address space at the extern base without emitting
+        // initializer bytes; the machine zero-maps it and the program uses it
+        // like static data.
+        let src = "\
+.extern var 4
+.text
+main:
+    la t0, var
+    li t1, 77
+    sw t1, 0(t0)
+    lw a0, 0(t0)
+    li a7, 10
+    ecall
+";
+        let r = asm(src);
+        assert!(!r.has_errors(), "diags: {:?}", r.diagnostics);
+        let var = r.program.as_ref().unwrap().symbols.get("var").unwrap().addr;
+        assert_eq!(var, 0x1000_0000); // the data-segment base (extern region)
+        let mut m = Machine::new(r.program.unwrap(), Box::new(ScriptHost::default()), MachineConfig::default());
+        // The reservation zero-mapped the region before any execution.
+        let mut buf = [0u8; 4];
+        m.peek_bytes(var, &mut buf).unwrap();
+        assert_eq!(buf, [0, 0, 0, 0]);
+        m.run(None);
+        // The store to the extern address succeeded and the load read it back.
+        assert_eq!(m.reg(10), 77);
+    }
+
+    #[test]
+    fn extern_reservations_advance_and_stay_distinct() {
+        // Two reservations: the second symbol's region does not overlap the
+        // first, so independent stores stay independent.
+        let src = "\
+.extern a 4
+.extern b 4
+.text
+main:
+    la t0, a
+    la t1, b
+    li t2, 1
+    li t3, 2
+    sw t2, 0(t0)
+    sw t3, 0(t1)
+    lw a0, 0(t0)
+    lw a1, 0(t1)
+    li a7, 10
+    ecall
+";
+        let r = asm(src);
+        assert!(!r.has_errors(), "diags: {:?}", r.diagnostics);
+        let p = r.program.as_ref().unwrap();
+        let a = p.symbols.get("a").unwrap().addr;
+        let b = p.symbols.get("b").unwrap().addr;
+        assert_eq!(a, 0x1000_0000);
+        assert_eq!(b, a + 4);
+        let mut m = Machine::new(p.clone(), Box::new(ScriptHost::default()), MachineConfig::default());
+        m.run(None);
+        assert_eq!(m.reg(10), 1);
+        assert_eq!(m.reg(11), 2);
+    }
+
+    // ---- memory configuration presets ----
+
+    #[test]
+    fn compact_data_preset_runs_a_data_at_zero_layout() {
+        // CompactDataAtZero: the data segment base is 0 and static data sits
+        // data_base + 0x10000 into it (Default's gap), so the matching
+        // assembler config moves its data base to 0x10000.
+        let files = vec![rvasm::InputFile {
+            name: "t.s".into(),
+            source: ".data\nv: .word 99\n.text\nlw a0, v\nli a7, 10\necall\n".into(),
+        }];
+        let acfg = rvasm::AsmConfig { data_base: 0x0001_0000, ..rvasm::AsmConfig::default() };
+        let r = rvasm::assemble(&files, &acfg);
+        assert!(!r.has_errors(), "diags: {:?}", r.diagnostics);
+        let program = r.program.unwrap();
+        assert_eq!(program.data.base, 0x0001_0000);
+        let cfg = MachineConfig { layout: MemLayout::compact_data_at_zero(), ..MachineConfig::default() };
+        let mut m = Machine::new(program, Box::new(ScriptHost::default()), cfg);
+        assert_eq!(m.layout().name(), "CompactDataAtZero");
+        m.run(None);
+        assert_eq!(m.reg(10), 99);
+    }
+
+    #[test]
+    fn compact_text_preset_fetches_from_address_zero() {
+        // CompactTextAtZero: text at 0, data segment at the Default base.
+        let files = vec![rvasm::InputFile { name: "t.s".into(), source: "    li a0, 5\n    ecall\n".into() }];
+        let acfg = rvasm::AsmConfig { text_base: 0x0000_0000, ..rvasm::AsmConfig::default() };
+        let r = rvasm::assemble(&files, &acfg);
+        assert!(!r.has_errors(), "diags: {:?}", r.diagnostics);
+        let program = r.program.unwrap();
+        assert_eq!(program.text_base, 0);
+        let cfg = MachineConfig { layout: MemLayout::compact_text_at_zero(), ..MachineConfig::default() };
+        let mut m = Machine::new(program, Box::new(ScriptHost::default()), cfg);
+        assert_eq!(m.layout().name(), "CompactTextAtZero");
+        assert_eq!(m.pc(), 0);
+        m.run(None);
+        assert_eq!(m.reg(10), 5);
+    }
+
+    // ---- per-opcode execution counters ----
+
+    #[test]
+    fn opcode_counts_group_retired_instructions() {
+        let src = "\
+main:
+    li a0, 3            # addi (opcode 0x13)
+loop:
+    beqz a0, done       # beq (0x63)
+    addi a0, a0, -1     # addi
+    j loop              # jal (0x6f)
+done:
+    nop                 # addi zero, zero, 0; drops off the bottom
+";
+        let mut m = machine(src);
+        m.run(None);
+        // a0 counts 3->0: three loop passes, the entry li, and the nop.
+        let counts = m.opcode_counts();
+        assert_eq!(counts, vec![(0x13, 5), (0x63, 4), (0x6f, 3)]);
+        // The counts are a full partition of the retired instructions.
+        let total: u64 = counts.iter().map(|(_, n)| n).sum();
+        assert_eq!(total, m.instret());
+    }
+
+    #[test]
+    fn backstep_rewinds_opcode_counts() {
+        let mut m = machine("    addi a0, a0, 1\n    sw a0, 0(sp)\n");
+        m.step();
+        m.step();
+        assert_eq!(m.opcode_counts(), vec![(0x13, 1), (0x23, 1)]);
+        assert!(m.backstep());
+        assert_eq!(m.opcode_counts(), vec![(0x13, 1)]);
+        assert_eq!(m.instret(), 1);
+        // Re-executing after the backstep counts again.
+        m.step();
+        assert_eq!(m.opcode_counts(), vec![(0x13, 1), (0x23, 1)]);
+    }
+
+    #[test]
+    fn reset_clears_opcode_counts() {
+        let mut m = machine("    addi a0, a0, 1\n");
+        m.run(None);
+        assert_eq!(m.opcode_counts(), vec![(0x13, 1)]);
+        m.reset();
+        assert!(m.opcode_counts().is_empty());
+        assert_eq!(m.instret(), 0);
     }
 
     // ---- RV64 mode ----

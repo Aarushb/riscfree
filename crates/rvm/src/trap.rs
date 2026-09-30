@@ -75,6 +75,11 @@ impl Machine {
         if self.mmio.xmit_ie && self.mmio.xmit_edge_latched() {
             return Some(DISPLAY);
         }
+        // The hex-keypad request is latched at press time (the device's own
+        // enable gate already applied), so only the latch is polled here.
+        if self.mmio.keys_pending {
+            return Some(HEX_KEYS);
+        }
         // ...then software, then the timer.
         if self.software_pending {
             return Some(SOFTWARE);
@@ -133,6 +138,12 @@ impl Machine {
                 if self.mmio.take_xmit_edge() {
                     self.journal.push(Undo::XmitEdge);
                 }
+            }
+            HEX_KEYS => {
+                // Latched at press time; consume it like the software
+                // request so the handler's uret does not immediately re-trap.
+                self.mmio.keys_pending = false;
+                self.journal.push(Undo::HexKeys);
             }
             SOFTWARE => {
                 self.software_pending = false;

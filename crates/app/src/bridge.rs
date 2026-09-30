@@ -27,6 +27,10 @@ pub enum Cmd {
     SetBreakpoint { addr: u32, on: bool },
     /// Read len bytes of memory for a data view; `tag` routes the response.
     ReadMemory { addr: u32, len: u32, tag: u32 },
+    /// Press a Digital Lab Sim hex keypad key (scan code, e.g. 0x11).
+    PressHexKey(u8),
+    /// Request per-opcode execution counts; `tag` routes the response.
+    GetCounts { tag: u32 },
 }
 
 pub enum Evt {
@@ -34,6 +38,8 @@ pub enum Evt {
     Output(String),
     /// Response to ReadMemory: the bytes at the requested base.
     Memory { base: u32, bytes: Vec<u8>, tag: u32 },
+    /// Response to GetCounts: (opcode, count) pairs sorted by opcode.
+    Counts { counts: Vec<(u32, u64)>, tag: u32 },
     /// Full register snapshot; sent after loads, run chunks, and halts.
     /// Boxed because 32 registers dwarf the other variants.
     State(Box<StateSnapshot>),
@@ -47,6 +53,7 @@ pub enum Evt {
 pub struct StateSnapshot {
     pub regs: [u64; 32],
     pub fregs: [u64; 32],
+    pub displays: [u8; 2],
     pub pc: u32,
     pub instret: u64,
 }
@@ -202,6 +209,17 @@ pub fn start_sim_thread(cmds: Receiver<Cmd>, events: Sender<Evt>, input: InputCh
                         events.send(Evt::Memory { base: addr, bytes, tag }).ok();
                     }
                 }
+                Cmd::PressHexKey(scan) => {
+                    if let Some(m) = machine.as_mut() {
+                        m.press_hex_key(scan);
+                    }
+                }
+                Cmd::GetCounts { tag } => {
+                    if let Some(m) = machine.as_ref() {
+                        let counts = m.opcode_counts();
+                        events.send(Evt::Counts { counts, tag }).ok();
+                    }
+                }
             }
             continue;
         }
@@ -263,7 +281,14 @@ fn send_state(events: &Sender<Evt>, m: &Machine) {
     for (i, r) in fregs.iter_mut().enumerate() {
         *r = m.freg(i);
     }
+    let displays = [m.display_segments(0), m.display_segments(1)];
     events
-        .send(Evt::State(Box::new(StateSnapshot { regs, fregs, pc: m.pc(), instret: m.instret() })))
+        .send(Evt::State(Box::new(StateSnapshot {
+            regs,
+            fregs,
+            displays,
+            pc: m.pc(),
+            instret: m.instret(),
+        })))
         .ok();
 }
