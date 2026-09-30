@@ -26,9 +26,16 @@ def stdin_for(program: Path) -> str:
     return input_file.read_text() if input_file.exists() else ""
 
 
+def flags_for(program: Path) -> list[str]:
+    # Optional <name>.flags holds extra CLI flags (e.g. --rv64, --compressed),
+    # whitespace-separated, inserted before the program path.
+    flags_file = program.with_suffix(".flags")
+    return flags_file.read_text().split() if flags_file.exists() else []
+
+
 def run_cli(program: Path) -> tuple[str, int]:
     result = subprocess.run(
-        [str(CLI), "--run", str(program)],
+        [str(CLI), "--run", *flags_for(program), str(program)],
         capture_output=True,
         text=True,
         timeout=60,
