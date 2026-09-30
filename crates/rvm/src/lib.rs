@@ -1753,6 +1753,49 @@ ecall
     }
 
     #[test]
+    fn compressed_word_ops_on_rv64() {
+        // c.subw/c.addw must run as word-width ops; before the q1 field
+        // fix they decoded as full-width sub/add.
+        let src = "c.li s1, -8
+c.li a2, 4
+c.subw s1, s1, a2
+c.mv a0, s1
+c.li a7, 1
+ecall
+c.addw s1, s1, a2
+c.mv a0, s1
+ecall
+c.li a7, 10
+ecall
+";
+        let files = vec![rvasm::InputFile {
+            name: "w.s".into(),
+            source: src.into(),
+        }];
+        let r = rvasm::assemble(
+            &files,
+            &rvasm::AsmConfig {
+                allow_compressed: true,
+                rv64: true,
+                ..rvasm::AsmConfig::default()
+            },
+        );
+        assert!(!r.has_errors(), "{:?}", r.diagnostics);
+        let mut m = Machine::new(
+            r.program.unwrap(),
+            Box::new(ScriptHost::default()),
+            MachineConfig {
+                rv64: true,
+                ..MachineConfig::default()
+            },
+        );
+        m.run(None);
+        // -8 - 4 = -12, then -12 + 4 = -8; both stay sign-extended words.
+        assert_eq!(m.exit_code(), Some(0));
+        assert_eq!(m.reg(9), 0xffff_ffff_ffff_fff8);
+    }
+
+    #[test]
     fn compressed_doubleword_sp_roundtrip() {
         // RV64: c.sdsp/c.ldsp move a 64-bit value through the stack slot.
         let src = "\

@@ -229,16 +229,17 @@ pub fn expand_compressed(word: u16, rv64: bool) -> Option<u32> {
                         _ => {
                             // c.sub/c.xor/c.or/c.and: funct2 at [6:5], rs2'
                             // at [4:2]. On RV64 bit12=1 selects c.subw/c.addw
-                            // (word-width variants, opcode 0x3b).
+                            // (word-width variants, opcode 0x3b); on RV32
+                            // those encodings are reserved.
                             let rs2 = bits(word, 4, 2) + 8;
                             let funct2 = bits(word, 6, 5);
                             if bits(word, 12, 12) == 1 {
+                                if !rv64 {
+                                    return None;
+                                }
                                 let funct7 = if funct2 == 0 { 0x20 } else { 0x00 };
                                 return Some(
-                                    0x3b | (funct7 << 25)
-                                        | (rs2 << 20)
-                                        | (rd << 15)
-                                        | (rd << 7),
+                                    0x3b | (funct7 << 25) | (rs2 << 20) | (rd << 15) | (rd << 7),
                                 );
                             }
                             let (funct7, funct3) = match funct2 {
@@ -400,29 +401,112 @@ mod tests {
         assert_eq!(expand_compressed(0x8082, false), Some(0x00008067));
         // c.nop = 0x0001 -> addi x0, x0, 0 = 0x00000013.
         assert_eq!(expand_compressed(0x0001, false), Some(0x00000013));
-        // c.mv a0, a1 = 0x852e -> addi a0, x0, a1.
+        // c.mv a0, a1 = 0x852e -> add a0, x0, a1.
         assert_eq!(expand_compressed(0x852e, false), Some(0x00b00533));
     }
-}
 
-#[cfg(test)]
-mod debug_probe {
-    use super::*;
     #[test]
-    fn probe() {
-        println!("jr ra = {:?}", expand_compressed(0x8082, false));
-        println!("mv a0,a1 = {:?}", expand_compressed(0x852e, false));
-        println!("ebreak = {:?}", expand_compressed(0x9002, false));
+    fn q1_reg_group_golden_expansions() {
+        // The Q1 0x4 group keeps rd' at [9:7], selector at [11:10], funct2
+        // at [6:5], and rs2' at [4:2]. The 16-bit words come from the
+        // assembler so the encoder-to-expander pair is checked as a unit;
+        // the expected words are the standard 32-bit encodings.
+        let hw = |src: &str| -> u16 {
+            let files = vec![rvasm::InputFile {
+                name: "t.s".into(),
+                source: src.into(),
+            }];
+            let r = rvasm::assemble(
+                &files,
+                &rvasm::AsmConfig {
+                    allow_compressed: true,
+                    ..rvasm::AsmConfig::default()
+                },
+            );
+            assert!(!r.has_errors(), "{:?} for {src}", r.diagnostics);
+            r.program.unwrap().statements[0]
+                .encoding16
+                .expect("expected a compressed encoding")
+        };
+        // c.sub s1, s1, a2 -> sub x9, x9, x12.
+        assert_eq!(
+            expand_compressed(hw("c.sub s1, s1, a2"), false),
+            Some(0x40c4_84b3)
+        );
+        // c.xor s1, s1, a2 -> xor x9, x9, x12.
+        assert_eq!(
+            expand_compressed(hw("c.xor s1, s1, a2"), false),
+            Some(0x00c4_c4b3)
+        );
+        // c.or s1, s1, a2 -> or x9, x9, x12.
+        assert_eq!(
+            expand_compressed(hw("c.or s1, s1, a2"), false),
+            Some(0x00c4_e4b3)
+        );
+        // c.and s1, s1, a2 -> and x9, x9, x12.
+        assert_eq!(
+            expand_compressed(hw("c.and s1, s1, a2"), false),
+            Some(0x00c4_f4b3)
+        );
+        // c.srai s1, 3 -> srai x9, x9, 3.
+        assert_eq!(
+            expand_compressed(hw("c.srai s1, 3"), false),
+            Some(0x4034_d493)
+        );
+        // c.andi s0, 15 -> andi x8, x8, 15.
+        assert_eq!(
+            expand_compressed(hw("c.andi s0, 15"), false),
+            Some(0x00f4_7413)
+        );
     }
-}
 
-#[cfg(test)]
-mod probe2 {
-    use super::*;
     #[test]
-    fn probe_swsp() {
-        let r = expand_compressed(0xc22a, false);
-        println!("swsp expand: {r:?}");
-        assert!(r.is_some());
+    fn q1_subw_addw_golden_expansions() {
+        // RV64 word-width forms: bit12=1 with funct2 00/01 selects
+        // c.subw/c.addw (opcode 0x3b), not sub/add.
+        let hw = |src: &str| -> u16 {
+            let files = vec![rvasm::InputFile {
+                name: "t.s".into(),
+                source: src.into(),
+            }];
+            let r = rvasm::assemble(
+                &files,
+                &rvasm::AsmConfig {
+                    allow_compressed: true,
+                    rv64: true,
+                    ..rvasm::AsmConfig::default()
+                },
+            );
+            assert!(!r.has_errors(), "{:?} for {src}", r.diagnostics);
+            r.program.unwrap().statements[0]
+                .encoding16
+                .expect("expected a compressed encoding")
+        };
+        // c.subw s1, s1, a2 -> subw x9, x9, x12.
+        assert_eq!(
+            expand_compressed(hw("c.subw s1, s1, a2"), true),
+            Some(0x40c4_84bb)
+        );
+        // c.addw s1, s1, a2 -> addw x9, x9, x12.
+        assert_eq!(
+            expand_compressed(hw("c.addw s1, s1, a2"), true),
+            Some(0x00c4_84bb)
+        );
+        // On RV32 those encodings are reserved.
+        assert_eq!(expand_compressed(0x9c91, false), None);
+        // Assembling RV64-only forms without rv64 fails at assembly time.
+        let files = vec![rvasm::InputFile {
+            name: "t.s".into(),
+            source: "c.ld a2, 0(s0)\n".into(),
+        }];
+        let r = rvasm::assemble(
+            &files,
+            &rvasm::AsmConfig {
+                allow_compressed: true,
+                ..rvasm::AsmConfig::default()
+            },
+        );
+        assert!(r.has_errors());
+        assert_eq!(r.diagnostics[0].code, "E-XLEN");
     }
 }
