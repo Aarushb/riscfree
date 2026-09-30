@@ -210,14 +210,23 @@ impl Machine {
         self.waiting
     }
 
-    /// Clear a debugger stop (breakpoint or `ebreak`) and arm a one-shot
-    /// skip so the breakpoint at the current pc does not re-fire on resume —
-    /// standard continue semantics: it fires again on the *next* arrival at
-    /// that address. Real terminations (exit, error, dropped-off) stay put.
+    /// Clear a debugger stop and resume. For breakpoints/ebreaks a one-shot
+    /// skip is armed so the stop at the current pc does not re-fire
+    /// immediately — standard continue semantics: it fires again on the
+    /// *next* arrival at that address. Watchpoint and memcheck stops need no
+    /// skip: the watched instruction already retired, so the pc is past it
+    /// (and arming one would wrongly swallow a breakpoint on the next
+    /// instruction). Real terminations (exit, error, dropped-off) stay put.
     pub fn continue_after_stop(&mut self) {
-        if matches!(self.terminated, Some(Halt::Breakpoint) | Some(Halt::Ebreak)) {
-            self.skip_break_once = Some(self.pc);
-            self.terminated = None;
+        match self.terminated {
+            Some(Halt::Breakpoint) | Some(Halt::Ebreak) => {
+                self.skip_break_once = Some(self.pc);
+                self.terminated = None;
+            }
+            Some(Halt::Watchpoint { .. }) | Some(Halt::Memcheck { .. }) => {
+                self.terminated = None;
+            }
+            _ => {}
         }
     }
 }

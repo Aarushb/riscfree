@@ -16,8 +16,9 @@ const RUN_CHUNK: u64 = 100_000;
 
 pub enum Cmd {
     /// Install a freshly assembled program (also resets the machine); the
-    /// flag selects RV64 machine semantics and must match the assemble mode.
-    Load(Box<Program>, bool),
+    /// flags select RV64 and memcheck and must match the assemble-time
+    /// choices.
+    Load(Box<Program>, bool, bool),
     Run,
     Pause,
     Step,
@@ -29,6 +30,8 @@ pub enum Cmd {
     ReadMemory { addr: u32, len: u32, tag: u32 },
     /// Press a Digital Lab Sim hex keypad key (scan code, e.g. 0x11).
     PressHexKey(u8),
+    /// Toggle a write watchpoint covering one word at addr.
+    ToggleMemWatchpoint { addr: u32 },
     /// Request per-opcode execution counts; `tag` routes the response.
     GetCounts { tag: u32 },
     /// Arm the instruction-count timer (interrupt cause 0x10).
@@ -137,7 +140,7 @@ pub fn start_sim_thread(cmds: Receiver<Cmd>, events: Sender<Evt>, input: InputCh
 
         if let Some(cmd) = cmd {
             match cmd {
-                Cmd::Load(program, rv64) => {
+                Cmd::Load(program, rv64, memcheck) => {
                     let host = ChannelHost {
                         events: events.clone(),
                         input: input.clone(),
@@ -147,7 +150,7 @@ pub fn start_sim_thread(cmds: Receiver<Cmd>, events: Sender<Evt>, input: InputCh
                     let m = Machine::new(
                         *program,
                         Box::new(host),
-                        MachineConfig { rv64, ..MachineConfig::default() },
+                        MachineConfig { rv64, memcheck, ..MachineConfig::default() },
                     );
                     let (pc, instret) = (m.pc(), m.instret());
                     send_state(&events, &m);
@@ -162,7 +165,12 @@ pub fn start_sim_thread(cmds: Receiver<Cmd>, events: Sender<Evt>, input: InputCh
                             // needs Reset first.
                             match m.halt_reason() {
                                 None => true,
-                                Some(Halt::Breakpoint | Halt::Ebreak) => {
+                                Some(
+                                    Halt::Breakpoint
+                                    | Halt::Ebreak
+                                    | Halt::Watchpoint { .. }
+                                    | Halt::Memcheck { .. },
+                                ) => {
                                     if let Some(m) = machine.as_mut() {
                                         m.continue_after_stop();
                                     }
@@ -216,6 +224,28 @@ pub fn start_sim_thread(cmds: Receiver<Cmd>, events: Sender<Evt>, input: InputCh
                 Cmd::PressHexKey(scan) => {
                     if let Some(m) = machine.as_mut() {
                         m.press_hex_key(scan);
+                    }
+                }
+                Cmd::ToggleMemWatchpoint { addr } => {
+                    if let Some(m) = machine.as_mut() {
+                        let covering: Vec<u32> = m
+                            .watchpoints()
+                            .into_iter()
+                            .filter(|(_, spec)| match spec {
+                                rvm::WatchSpec::Mem { addr: base, len, .. } => {
+                                    addr >= *base && addr < base + len
+                                }
+                                _ => false,
+                            })
+                            .map(|(id, _)| id)
+                            .collect();
+                        if covering.is_empty() {
+                            m.add_mem_watchpoint(addr, 4, false, true);
+                        } else {
+                            for id in covering {
+                                m.remove_watchpoint(id);
+                            }
+                        }
                     }
                 }
                 Cmd::GetCounts { tag } => {

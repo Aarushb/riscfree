@@ -41,6 +41,7 @@ const ID_RUN_PAUSE: Id = 2005;
 const ID_RUN_STOP: Id = 2006;
 const ID_RUN_RESET: Id = 2007;
 const ID_RUN_TOGGLE_BREAK: Id = 2009;
+const ID_RUN_TOGGLE_WATCH: Id = 2010;
 const ID_SHORTCUTS: Id = 3001;
 const ID_TOOL_BITMAP: Id = 4001;
 const ID_TOOL_FLOAT: Id = 4002;
@@ -77,6 +78,8 @@ struct Shared {
     memory_base: RefCell<u32>,
     /// RV64 mode for assemble and execution (default RV32, like RARS).
     rv64: RefCell<bool>,
+    /// Memcheck: halt on reads of uninitialized memory (opt-in).
+    memcheck: RefCell<bool>,
 }
 
 /// Every widget the behavior code needs, kept by handle. wxDragon handles are
@@ -155,6 +158,7 @@ fn main() {
             diagnostic_spans: RefCell::new(Vec::new()),
             memory_base: RefCell::new(0x1001_0000),
             rv64: RefCell::new(false),
+            memcheck: RefCell::new(false),
         });
         let narrator = Rc::new(Narrator::new());
 
@@ -543,6 +547,38 @@ fn toggle_selected_breakpoint(w: &Widgets, cmd_tx: &Sender<Cmd>) {
         0,
     );
     cmd_tx.send(Cmd::SetBreakpoint { addr, on }).ok();
+}
+
+/// Toggle a write watchpoint on the selected Program row's address.
+fn toggle_selected_watchpoint(w: &Widgets, cmd_tx: &Sender<bridge::Cmd>) {
+    let mut index = w.program_list.get_first_selected_item();
+    if index < 0 {
+        index = PROGRAM_ROWS.with(|rows| {
+            rows.borrow()
+                .iter()
+                .position(|row| row[4] == "PC")
+                .map(|i| i as i32)
+                .unwrap_or(if rows.borrow().is_empty() { -1 } else { 0 })
+        });
+    }
+    if index < 0 {
+        return;
+    }
+    let addr_text = w.program_list.get_item_text(index as i64, 0);
+    let Ok(addr) = u32::from_str_radix(addr_text.trim_start_matches("0x"), 16) else {
+        return;
+    };
+    PROGRAM_ROWS.with(|rows| {
+        if let Some(row) = rows.borrow_mut().get_mut(index as usize) {
+            let on = row[3].is_empty();
+            // The Breakpoint column doubles as the marker column; a row can
+            // hold both a breakpoint and a watchpoint marker, so keep them
+            // distinguishable.
+            row[3] = if on { "watch".to_string() } else { String::new() };
+        }
+    });
+    w.program_list.refresh_items(index as i64, index as i64);
+    cmd_tx.send(bridge::Cmd::ToggleMemWatchpoint { addr }).ok();
 }
 
 fn handle_sim_event(
@@ -1014,7 +1050,13 @@ fn do_assemble(widgets: &Widgets, shared: &Shared, narrator: &Narrator, cmd_tx: 
             widgets
                 .status_bar
                 .set_status_text(&format!("Assembled, {} instructions. Ready to run.", program.statements.len()), 0);
-            cmd_tx.send(Cmd::Load(Box::new(program), *shared.rv64.borrow())).ok();
+            cmd_tx
+                .send(Cmd::Load(
+                    Box::new(program),
+                    *shared.rv64.borrow(),
+                    *shared.memcheck.borrow(),
+                ))
+                .ok();
         }
     } else {
         widgets.status_bar.set_status_text("Assembly failed; see Assembler Messages", 0);
@@ -1107,6 +1149,7 @@ fn bind_menu_events(
             ID_RUN_STOP => { tx.send(Cmd::Pause).ok(); }
             ID_RUN_RESET => { tx.send(Cmd::Reset).ok(); }
             ID_RUN_TOGGLE_BREAK => toggle_selected_breakpoint(&w, &tx),
+            ID_RUN_TOGGLE_WATCH => toggle_selected_watchpoint(&w, &tx),
             ID_TOOL_FLOAT => {
                 tools_float::FloatRepTool::open();
             }
@@ -1189,11 +1232,20 @@ fn show_settings_dialog(frame: &Frame, shared: &Rc<Shared>) {
     xlen_row.add(&xlen, 1, SizerFlag::Expand | SizerFlag::All, 4);
     sizer.add_sizer(&xlen_row, 0, SizerFlag::Expand, 0);
 
+    let memcheck = CheckBox::builder(&panel)
+        .with_label("Halt on reads of uninitialized memory (memcheck)")
+        .with_value(*shared.memcheck.borrow())
+        .build();
+    memcheck.set_accessibility_label("Memcheck");
+    memcheck.set_accessibility_description("Pause the program when it reads memory it never wrote");
+    sizer.add(&memcheck, 0, SizerFlag::All, 4);
+
     let close_btn = Button::builder(&panel).with_label("Close").build();
     close_btn.set_accessibility_label("Close settings");
     let dlg = dialog;
     let choice = verbosity;
     let xlen_choice = xlen;
+    let memcheck_box = memcheck;
     let sh = shared.clone();
     close_btn.on_click(move |_| {
         if let Some(sel) = choice.get_selection() {
@@ -1206,6 +1258,7 @@ fn show_settings_dialog(frame: &Frame, shared: &Rc<Shared>) {
         if let Some(sel) = xlen_choice.get_selection() {
             *sh.rv64.borrow_mut() = sel == 1;
         }
+        *sh.memcheck.borrow_mut() = memcheck_box.get_value();
         dlg.end_modal(ID_OK);
     });
     sizer.add(&close_btn, 0, SizerFlag::AlignCenterHorizontal | SizerFlag::All, 8);
@@ -1229,7 +1282,7 @@ fn show_shortcuts_dialog(frame: &Frame) {
     let panel = Panel::builder(&dialog).build();
     let sizer = BoxSizer::builder(Orientation::Vertical).build();
 
-    let shortcuts: [(&str, &str); 13] = [
+    let shortcuts: [(&str, &str); 14] = [
         ("Assemble", "F3"),
         ("Run program", "F5"),
         ("Pause run", "F9"),
@@ -1238,6 +1291,7 @@ fn show_shortcuts_dialog(frame: &Frame) {
         ("Stop program", "F11"),
         ("Reset program", "F12"),
         ("Toggle breakpoint", "Ctrl+D"),
+        ("Toggle memory watchpoint", "Ctrl+W"),
         ("New file", "Ctrl+N"),
         ("Open file", "Ctrl+O"),
         ("Save file", "Ctrl+S"),

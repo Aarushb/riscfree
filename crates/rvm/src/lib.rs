@@ -9,10 +9,12 @@ mod mmio;
 mod memory;
 mod syscalls;
 mod trap;
+mod watch;
 
 pub use host::{Host, ScriptHost, StdHost};
 pub use memory::MemLayout;
 pub use trap::irq;
+pub use watch::WatchSpec;
 
 use crate::memory::{MemError, Memory};
 use crate::mmio::Mmio;
@@ -34,6 +36,10 @@ pub struct MachineConfig {
     pub allow_unaligned: bool,
     /// Allow stores into the text segment (RARS's self-modifying code flag).
     pub self_modifying_code: bool,
+    /// Memcheck: halt on any load that touches uninitialized memory (Venus's
+    /// uninitialized-read detector, see `watch`). Off by default; when off
+    /// the only cost is one branch per load.
+    pub memcheck: bool,
 }
 
 /// Why the machine stopped producing instructions.
@@ -47,6 +53,14 @@ pub enum Halt {
     Breakpoint,
     /// `ebreak` executed.
     Ebreak,
+    /// A memory or register watchpoint fired. Like a breakpoint this is a
+    /// debugger pause (backstep/`continue_after_stop` resume from it), but
+    /// the watched instruction already retired with its effect applied —
+    /// see the `watch` module note.
+    Watchpoint { description: String },
+    /// Memcheck caught a load touching uninitialized memory. Raised after
+    /// the load retired; `continue_after_stop`/backstep resume from it.
+    Memcheck { description: String },
     /// Simulation error (bad address, unknown syscall, ...).
     Error { message: String },
     /// Caller-imposed instruction limit reached.
@@ -109,6 +123,10 @@ enum Undo {
     Csr { id: u16, old: u64 },
     Mem { addr: u32, old: u64, width: u8 },
     Pc { old: u32 },
+    /// Memcheck shadow: this byte was uninitialized before the statement's
+    /// store initialized it; undo clears the flag so a memcheck halt after a
+    /// backstep replays identically. Only pushed when memcheck is on.
+    ShadowWasUninit { addr: u32 },
     /// A trap consumed the timer's current tick; undo reschedules it.
     TimerDeadline { old: u64 },
     /// A trap consumed the transmitter's edge request; undo re-latches it.
@@ -187,6 +205,20 @@ pub struct Machine {
     /// One-shot breakpoint skip armed by `continue_after_stop` so the
     /// breakpoint under the stopped pc does not re-fire immediately.
     pub(crate) skip_break_once: Option<u32>,
+    /// Live watchpoints (memory ranges and registers), shared id namespace.
+    pub(crate) watchpoints: Vec<watch::Watch>,
+    /// Next watchpoint id (never reused within a machine's lifetime).
+    pub(crate) next_watch_id: u32,
+    /// Memcheck init shadow; empty (zero cost) unless `config.memcheck`.
+    pub(crate) shadow: watch::InitShadow,
+    /// Stop raised while the current instruction executed (watchpoint or
+    /// memcheck): applied at the end of the step, after the instruction
+    /// retired.
+    pub(crate) pending_stop: Option<Halt>,
+    /// pc of the instruction currently executing (for watch/memcheck
+    /// descriptions raised inside the load/store helpers, which see the
+    /// already-advanced pc).
+    pub(crate) active_pc: u32,
 }
 
 // CSR addresses (RARS's set).
@@ -259,6 +291,11 @@ impl Machine {
             timer_deadline: 0,
             software_pending: false,
             skip_break_once: None,
+            watchpoints: Vec::new(),
+            next_watch_id: 0,
+            shadow: watch::InitShadow::default(),
+            pending_stop: None,
+            active_pc: 0,
         };
         m.regs[3] = 0x1000_8000; // gp
         m.regs[2] = 0x7fff_effc; // sp
@@ -278,6 +315,19 @@ impl Machine {
         // until the program stores into them).
         for (addr, bytes) in &self.program.extern_chunks {
             self.mem.write_bytes(*addr, bytes);
+        }
+        // Memcheck: everything the loader placed counts as initialized —
+        // only runtime reads of never-written memory are the bug.
+        if self.config.memcheck {
+            for s in &self.program.statements {
+                self.shadow.mark_init(s.addr, 4);
+            }
+            if !self.program.data.bytes.is_empty() {
+                self.shadow.mark_init(self.program.data.base, self.program.data.bytes.len() as u32);
+            }
+            for (addr, bytes) in &self.program.extern_chunks {
+                self.shadow.mark_init(*addr, bytes.len() as u32);
+            }
         }
     }
 
@@ -422,7 +472,13 @@ impl Machine {
             return self.error(format!("cannot fetch instruction at 0x{pc_before:08x}"));
         };
 
-        let outcome = exec::execute(self, word, pc_before);
+        // Watch/memcheck descriptions raised mid-instruction name this pc
+        // (the load/store helpers see the already-advanced pc). Cleared up
+        // front so a stop can never leak across steps.
+        self.active_pc = pc_before;
+        self.pending_stop = None;
+
+        let mut outcome = exec::execute(self, word, pc_before);
         // A wfi with nothing pending parked the hart: pc stays at the wfi,
         // nothing retires, and the run loop takes over the waiting.
         if self.waiting {
@@ -461,6 +517,17 @@ impl Machine {
                 }
                 return outcome.outcome;
             }
+            return outcome.outcome;
+        }
+
+        // Watchpoint/memcheck stops land here: the watched instruction
+        // already retired with its effect applied, so the halt reads as
+        // "after the watched access" (the documented difference from
+        // breakpoints, which stop before the instruction runs). The Retired
+        // record above means one backstep undoes the effect and the halt.
+        if let Some(h) = self.pending_stop.take() {
+            self.terminated = Some(h.clone());
+            outcome.outcome.events.push(Event::Halted(h));
             return outcome.outcome;
         }
 
@@ -564,6 +631,7 @@ impl Machine {
                     let bytes = old.to_le_bytes();
                     self.mem.write_bytes(addr, &bytes[..width as usize]);
                 }
+                Undo::ShadowWasUninit { addr } => self.shadow.clear_init(addr),
                 Undo::Pc { old } => self.pc = old,
                 Undo::TimerDeadline { old } => self.timer_deadline = old,
                 Undo::XmitEdge => self.mmio.restore_xmit_edge(),
@@ -597,6 +665,11 @@ impl Machine {
         self.pc = self.program.text_base;
         self.mem.clear();
         self.load_program_image();
+        // The shadow is rebuilt by load_program_image, so reset restores the
+        // program-load init state too. Watchpoint registrations survive a
+        // reset, like breakpoints.
+        self.shadow.clear();
+        self.pending_stop = None;
         self.journal.records.clear();
         self.terminated = None;
         self.instret = 0;
@@ -619,6 +692,9 @@ impl Machine {
             top = top.wrapping_sub(arg.len() as u32 + 1); // + NUL
             self.mem.write_bytes(top, arg.as_bytes());
             self.mem.write_bytes(top + arg.len() as u32, &[0]);
+            if self.config.memcheck {
+                self.shadow.mark_init(top, arg.len() as u32 + 1);
+            }
             string_addrs.push(top);
         }
         // Then the pointer array, word-aligned, with an argv[argc] = NULL.
@@ -628,6 +704,11 @@ impl Machine {
             self.mem.write_bytes(top + 4 * i as u32, &addr.to_le_bytes());
         }
         self.mem.write_bytes(top + 4 * args.len() as u32, &0u32.to_le_bytes());
+        // Memcheck: the argv block the program is entitled to read (strings,
+        // NULs, and the pointer array) counts as initialized.
+        if self.config.memcheck {
+            self.shadow.mark_init(top, 4 * (args.len() as u32 + 1));
+        }
         self.regs[10] = args.len() as u64; // a0 = argc
         self.regs[11] = u64::from(top); // a1 = argv
     }
@@ -642,6 +723,7 @@ impl Machine {
         self.journal.push(Undo::Reg { index, old });
         self.regs[index] = value;
         changes.push(Change::Reg { index, old, new: value });
+        self.check_reg_watch(index);
     }
 
     pub(crate) fn write_freg(&mut self, index: usize, value: u64, changes: &mut Vec<Change>) {
@@ -720,6 +802,9 @@ impl Machine {
                 self.mmio.load(addr, width, host)
             };
             changes.push(Change::Mem { addr, old: 0, new: val, width: width as u8 });
+            // Device reads are watched like memory reads; memcheck is
+            // exempt (device semantics, not memory).
+            self.check_mem_watch(addr, width, false);
             return Ok(val);
         }
         if !self.valid_addr(addr) {
@@ -734,6 +819,12 @@ impl Machine {
             // fld moves a full doubleword into an FP register.
             _ => u64::from_le_bytes(buf),
         };
+        // Memcheck first (the more severe report), then watchpoints; one
+        // stop per instruction.
+        if self.config.memcheck {
+            self.check_memcheck_load(addr, width);
+        }
+        self.check_mem_watch(addr, width, false);
         changes.push(Change::Mem { addr, old: 0, new: val, width: width as u8 });
         Ok(val)
     }
@@ -761,6 +852,9 @@ impl Machine {
                 self.mmio.store(addr, value, host);
             }
             changes.push(Change::Mem { addr, old: 0, new: value, width: width as u8 });
+            // Device writes are watched like memory writes; memcheck is
+            // exempt (device semantics, not memory).
+            self.check_mem_watch(addr, width, true);
             return Ok(());
         }
         if !self.valid_addr(addr) {
@@ -774,13 +868,41 @@ impl Machine {
         };
         let bytes = value.to_le_bytes();
         self.mem.write_bytes(addr, &bytes[..width as usize]);
+        // Memcheck: the store initializes what it covers, and each byte it
+        // flips journals its old state so backstep restores the shadow (and
+        // a memcheck halt after a backstep replays identically).
+        if self.config.memcheck {
+            for i in 0..width {
+                let a = addr.wrapping_add(i);
+                if !self.shadow.is_init(a) {
+                    self.journal.push(Undo::ShadowWasUninit { addr: a });
+                }
+            }
+            self.shadow.mark_init(addr, width);
+        }
         self.journal.push(Undo::Mem { addr, old, width: width as u8 });
         changes.push(Change::Mem { addr, old, new: value, width: width as u8 });
+        // The watch fires only once the store really landed (a failed store
+        // — alignment, access violation — watches nothing).
+        self.check_mem_watch(addr, width, true);
         Ok(())
     }
 
     pub(crate) fn host_mut(&mut self) -> &mut dyn Host {
         &mut *self.host
+    }
+
+    /// Memory write on behalf of a syscall (ReadString, file reads, GetCWD,
+    /// InputDialogString): the bytes land AND, under memcheck, count as
+    /// initialized — the program is entitled to read back what the syscall
+    /// wrote. Like all syscall memory effects these writes are not journaled
+    /// (they cannot be undone by backstep), so the shadow flips ride along
+    /// unjournaled and stay consistent with the bytes they describe.
+    pub(crate) fn syscall_write_bytes(&mut self, addr: u32, bytes: &[u8]) {
+        self.mem.write_bytes(addr, bytes);
+        if self.config.memcheck {
+            self.shadow.mark_init(addr, bytes.len() as u32);
+        }
     }
 }
 

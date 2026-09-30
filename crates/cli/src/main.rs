@@ -94,6 +94,9 @@ fn main() -> ExitCode {
                     eprintln!("simulation error: {message}");
                     return ExitCode::from(3);
                 }
+                Halt::Watchpoint { description } | Halt::Memcheck { description } => {
+                    eprintln!("simulation: {description}");
+                }
                 Halt::Limit => eprintln!("simulation: reached the step limit"),
             }
         }

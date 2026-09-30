@@ -56,7 +56,7 @@ fn run_syscall(m: &mut Machine, code: u32, changes: &mut Vec<Change>) -> Result<
             let n = maxlen.saturating_sub(1).min(bytes.len());
             let mut out = bytes[..n].to_vec();
             out.push(0);
-            m.mem.write_bytes(a0 as u32, &out);
+            m.syscall_write_bytes(a0 as u32, &out);
         }
         10 => return Err(Halt::Exit { code: 0 }),
         11 => {
@@ -121,7 +121,7 @@ fn run_syscall(m: &mut Machine, code: u32, changes: &mut Vec<Change>) -> Result<
                 }
             };
             out.push(0);
-            m.mem.write_bytes(a1 as u32, &out);
+            m.syscall_write_bytes(a1 as u32, &out);
             m.write_reg(11, status as u64, changes);
         }
         55 => {
@@ -163,7 +163,7 @@ fn run_syscall(m: &mut Machine, code: u32, changes: &mut Vec<Change>) -> Result<
             let mut buf = vec![0u8; a2 as u32 as usize];
             let n = m.host_mut().file_read(a0 as u32 as i32, &mut buf);
             if n > 0 {
-                m.mem.write_bytes(a1 as u32, &buf[..n as usize]);
+                m.syscall_write_bytes(a1 as u32, &buf[..n as usize]);
             }
             m.write_reg(10, n as i64 as u64, changes);
         }
@@ -189,7 +189,7 @@ fn run_syscall(m: &mut Machine, code: u32, changes: &mut Vec<Change>) -> Result<
             let n = (a1 as u32 as usize).saturating_sub(1).min(bytes.len());
             let mut out = bytes[..n].to_vec();
             out.push(0);
-            m.mem.write_bytes(a0 as u32, &out);
+            m.syscall_write_bytes(a0 as u32, &out);
             m.write_reg(10, 0, changes);
         }
         30 => {
