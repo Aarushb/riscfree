@@ -31,6 +31,10 @@ pub enum Cmd {
     PressHexKey(u8),
     /// Request per-opcode execution counts; `tag` routes the response.
     GetCounts { tag: u32 },
+    /// Arm the instruction-count timer (interrupt cause 0x10).
+    ArmTimer(u64),
+    /// Disarm the instruction-count timer.
+    ClearTimer,
 }
 
 pub enum Evt {
@@ -218,6 +222,16 @@ pub fn start_sim_thread(cmds: Receiver<Cmd>, events: Sender<Evt>, input: InputCh
                     if let Some(m) = machine.as_ref() {
                         let counts = m.opcode_counts();
                         events.send(Evt::Counts { counts, tag }).ok();
+                    }
+                }
+                Cmd::ArmTimer(interval) => {
+                    if let Some(m) = machine.as_mut() {
+                        m.set_timer(interval);
+                    }
+                }
+                Cmd::ClearTimer => {
+                    if let Some(m) = machine.as_mut() {
+                        m.clear_timer();
                     }
                 }
             }

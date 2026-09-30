@@ -9,8 +9,10 @@
 
 mod bridge;
 mod tools;
+mod tools_decode;
 mod tools_float;
 mod tools_lab;
+mod tools_timer;
 
 #[cfg(target_os = "windows")]
 use wxdragon::accessible::AccRole;
@@ -44,6 +46,8 @@ const ID_TOOL_BITMAP: Id = 4001;
 const ID_TOOL_FLOAT: Id = 4002;
 const ID_TOOL_LAB: Id = 4003;
 const ID_TOOL_COUNTER: Id = 4004;
+const ID_TOOL_TIMER: Id = 4005;
+const ID_TOOL_DECODE: Id = 4006;
 const ID_ABOUT: Id = 3002;
 
 const SAMPLE_RISCV: &str = "\
@@ -181,6 +185,7 @@ fn main() {
         let memory_listeners: tools::MemoryListeners = Rc::new(std::cell::RefCell::new(Vec::new()));
         let counts_listeners: tools_lab::CountsListeners =
             Rc::new(std::cell::RefCell::new(Vec::new()));
+        let waiting_flag: Rc<std::cell::RefCell<bool>> = Rc::new(std::cell::RefCell::new(false));
         let listener_tags = Rc::new(std::cell::RefCell::new(1u32)); // tag 0 = Memory tab
         std::thread::Builder::new()
             .name("sim".into())
@@ -360,6 +365,7 @@ fn main() {
             &memory_listeners,
             &counts_listeners,
             &listener_tags,
+            &waiting_flag,
         );
 
         // --- Event pump: simulation events -> views and narrator -------------
@@ -715,6 +721,8 @@ fn build_menu_bar() -> MenuBar {
         .append_item(ID_TOOL_FLOAT, "Float &Representation", "Convert between raw bits and float values")
         .append_item(ID_TOOL_LAB, "&Digital Lab Sim", "Seven segment displays and a hex keypad your program controls")
         .append_item(ID_TOOL_COUNTER, "Instruction &Counter", "Executed instruction counts grouped by opcode")
+        .append_item(ID_TOOL_TIMER, "&Timer Tool", "Arm periodic timer interrupts for handler coursework")
+        .append_item(ID_TOOL_DECODE, "Instruction &Decode", "Break an instruction word into its fields")
         .build();
 
     let help_menu = Menu::builder()
@@ -1022,10 +1030,12 @@ fn bind_menu_events(
     memory_listeners: &tools::MemoryListeners,
     counts_listeners: &tools_lab::CountsListeners,
     listener_tags: &std::rc::Rc<std::cell::RefCell<u32>>,
+    waiting_flag: &std::rc::Rc<std::cell::RefCell<bool>>,
 ) {
     let memory_listeners = std::rc::Rc::clone(memory_listeners);
     let counts_listeners = std::rc::Rc::clone(counts_listeners);
     let listener_tags = std::rc::Rc::clone(listener_tags);
+    let waiting_flag = std::rc::Rc::clone(waiting_flag);
     let fr = widgets.frame;
     let w = widgets.clone();
     let sh = std::rc::Rc::clone(shared);
@@ -1114,6 +1124,14 @@ fn bind_menu_events(
                 let counts = counts_listeners.clone();
                 let tx2 = tx.clone();
                 tools_lab::InstructionCounter::open(tx2, counts, tag);
+            }
+            ID_TOOL_TIMER => {
+                let tx2 = tx.clone();
+                let waiting = waiting_flag.clone();
+                tools_timer::TimerTool::open(tx2, waiting);
+            }
+            ID_TOOL_DECODE => {
+                tools_decode::DecodeTool::open();
             }
             ID_TOOL_BITMAP => {
                 let tag = tools::next_tag(&listener_tags);

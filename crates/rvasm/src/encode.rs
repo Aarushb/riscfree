@@ -319,6 +319,40 @@ pub fn opcode_representative(opcode: u32) -> Option<&'static str> {
         .map(|i| i.name)
 }
 
+/// Per-field decode breakdown of one instruction word, for the disassembly
+/// tools: every field the formats use, plus which base format it decodes as.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DecodedFields {
+    pub opcode: u32,
+    pub rd: u32,
+    pub funct3: u32,
+    pub rs1: u32,
+    pub rs2: u32,
+    pub funct7: u32,
+    /// Immediate field for I/S/B/U/J formats, raw (unshifted for U).
+    pub immediate: i32,
+    /// One of "R", "I", "S", "B", "U", "J" — the closest base format.
+    pub format: &'static str,
+}
+
+pub fn decode_fields(word: u32) -> DecodedFields {
+    let opcode = word & 0x7f;
+    let rd = (word >> 7) & 0x1f;
+    let funct3 = (word >> 12) & 0x7;
+    let rs1 = (word >> 15) & 0x1f;
+    let rs2 = (word >> 20) & 0x1f;
+    let funct7 = (word >> 25) & 0x7f;
+    let (immediate, format) = match opcode {
+        OP_IMM | LOAD | JALR | SYSTEM => (decode::imm_for(word), "I"),
+        STORE => (decode::imm_for(word), "S"),
+        BRANCH => (decode::imm_for(word), "B"),
+        LUI | AUIPC => ((word & 0xffff_f000) as i32, "U"),
+        JAL => (decode::imm_for(word), "J"),
+        _ => (0, "R"),
+    };
+    DecodedFields { opcode, rd, funct3, rs1, rs2, funct7, immediate, format }
+}
+
 fn enc_r(info: &InstructionInfo, rd: u32, rs1: u32, rs2: u32) -> u32 {
     (info.funct7 & 0x7f) << 25
         | (rs2 & 0x1f) << 20

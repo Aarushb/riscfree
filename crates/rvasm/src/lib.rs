@@ -9,7 +9,7 @@ mod asm;
 mod encode;
 mod lexer;
 
-pub use encode::{opcode_representative, InstructionInfo};
+pub use encode::{decode_fields, opcode_representative, DecodedFields, InstructionInfo};
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
