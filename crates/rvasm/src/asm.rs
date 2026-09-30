@@ -1687,7 +1687,7 @@ impl Assembler {
         } else {
             cops
         };
-        let (word, text) = crate::compressed::encode(instr.name, &cops)
+        let (word, text) = crate::compressed::encode(instr.name, &cops, self.cfg.rv64)
             .map_err(|(code, msg)| (code, msg, instr.source))?;
         Ok((word, text))
     }

@@ -142,14 +142,15 @@ fn creg(r: u8, what: &str) -> Result<u8, (&'static str, String)> {
 
 /// Encode one compressed instruction. `ops` are the parsed operands in source
 /// order; for branches and jumps the target is already resolved to a byte
-/// delta relative to this instruction's address.
-pub fn encode(name: &str, resolved: &[COp]) -> CResult {
+/// delta relative to this instruction's address. `rv64` gates the encodings
+/// that exist only in RV64C (and c.jal, which only exists in RV32C).
+pub fn encode(name: &str, resolved: &[COp], rv64: bool) -> CResult {
     // The compressed ALU ops are written with two operands (c.add rd, rs2)
     // but the three-operand uncompressed spelling is accepted too, taking
     // rs2 from the third operand.
     let normalized: Vec<COp>;
     let resolved = match (name, resolved.len()) {
-        ("c.add" | "c.sub" | "c.xor" | "c.or" | "c.and", 3) => {
+        ("c.add" | "c.sub" | "c.xor" | "c.or" | "c.and" | "c.subw" | "c.addw", 3) => {
             normalized = vec![resolved[0], resolved[2]];
             &normalized
         }
@@ -157,6 +158,28 @@ pub fn encode(name: &str, resolved: &[COp]) -> CResult {
     };
     let e = |code: &'static str, msg: String| -> CResult { Err((code, msg)) };
     let imm_of = |i: usize| resolved.get(i).copied().unwrap_or(COp::Imm(0));
+    let need_rv64 = |what: &str| -> CResult {
+        e(
+            "E-XLEN",
+            format!("'{what}' requires 64-bit mode (RV64); enable rv64 in the assembler settings"),
+        )
+    };
+
+    // XLEN-conditional encodings: reject up front so a bad assembly fails at
+    // assembly time instead of decoding as reserved in the machine.
+    match name {
+        "c.ld" | "c.sd" | "c.ldsp" | "c.sdsp" | "c.addiw" | "c.subw" | "c.addw" if !rv64 => {
+            return need_rv64(name);
+        }
+        "c.jal" if rv64 => {
+            return e(
+                "E-XLEN",
+                "'c.jal' is RV32-only; use c.j (or c.addiw for its encoding slot) in RV64"
+                    .to_string(),
+            );
+        }
+        _ => {}
+    }
 
     match name {
         // --- Quadrant 0 -------------------------------------------------
@@ -253,12 +276,6 @@ pub fn encode(name: &str, resolved: &[COp]) -> CResult {
         "c.addi" => {
             let rd = imm_of(0).reg("rd")?;
             let nzimm = imm_of(1).imm("immediate")?;
-            if nzimm == 0 {
-                return e(
-                    "E-IMM",
-                    "c.addi with immediate 0 is reserved (use c.nop or nop)".to_string(),
-                );
-            }
             if nzimm == 0 {
                 return e(
                     "E-IMM",
@@ -380,6 +397,22 @@ pub fn encode(name: &str, resolved: &[COp]) -> CResult {
             let w = 0b100u16 << 13
                 | (u16::from(rd) << 7)
                 | (0b11 << 10)
+                | (selector << 5)
+                | (u16::from(rs2) << 2)
+                | 0b01;
+            Ok((
+                w,
+                format!("{} {}, {}", &name[2..], spn_name(rd), spn_name(rs2)),
+            ))
+        }
+        "c.subw" | "c.addw" => {
+            let rd = creg(imm_of(0).reg("rd")?, "rd")?;
+            let rs2 = creg(imm_of(1).reg("rs2")?, "rs2")?;
+            let selector: u16 = if name == "c.subw" { 0b00 } else { 0b01 };
+            let w = 0b100u16 << 13
+                | (0b1 << 12)
+                | (0b11 << 10)
+                | (u16::from(rd) << 7)
                 | (selector << 5)
                 | (u16::from(rs2) << 2)
                 | 0b01;
@@ -591,18 +624,18 @@ mod tests {
         // c.nop is c.addi x0, 0 in spirit; our encoder rejects it (reserved),
         // so golden-check the documented classics instead.
         // c.ebreak = 0x9002
-        let (w, _) = encode("c.ebreak", &[]).unwrap();
+        let (w, _) = encode("c.ebreak", &[], false).unwrap();
         assert_eq!(w, 0x9002);
         // c.jr ra (rs1=1) = 0x8082 — the famous c.ret word.
-        let (w, _) = encode("c.jr", &[r(1)]).unwrap();
+        let (w, _) = encode("c.jr", &[r(1)], false).unwrap();
         assert_eq!(w, 0x8082);
         // c.mv a0, a1: funct4 1000, rd=a0 at [11:7], rs2=a1 at [6:2].
-        let (w, _) = encode("c.mv", &[r(10), r(11)]).unwrap();
+        let (w, _) = encode("c.mv", &[r(10), r(11)], false).unwrap();
         assert_eq!(w, 0x852e);
         // c.addi a0, 1 = 0x0105? pack: imm5=0,rd=10,imm40=1 -> 0x0105 | rd<<7:
         // 0b000_0_1010_0000_1_01 -> 0x0a05? compute: (1<<9)|(10<<7)|(1<<2)|1 = 0x200+0x500+4+1 = 0x0a05? No:
         // (nzimm&0x20)<<7 = 0; (10)<<7 = 0x500; (1&0x1f)<<2 = 4; |1 => 0x505.
-        let (w, text) = encode("c.addi", &[r(10), i(1)]).unwrap();
+        let (w, text) = encode("c.addi", &[r(10), i(1)], false).unwrap();
         assert_eq!(w, 0x505);
         assert_eq!(text, "addi a0, a0, 1");
     }
@@ -611,19 +644,19 @@ mod tests {
     fn quadrant0_layouts() {
         // c.addi4spn x8, 64: only nzuimm[6] is set, which lands at instr[7]:
         // w = 0x0080.
-        let (w, _) = encode("c.addi4spn", &[r(8), i(64)]).unwrap();
+        let (w, _) = encode("c.addi4spn", &[r(8), i(64)], false).unwrap();
         assert_eq!(w, 0x0080);
         // c.lw x8, 4(x9): funct3 010 at [15:13]; uimm=4 sets uimm[2] at
         // instr[6]; base x9 (slice 1) at [9:7]. w = 0x4000 | 0x80 | 0x40.
-        let (w, _) = encode("c.lw", &[r(8), r(9), i(4)]).unwrap();
+        let (w, _) = encode("c.lw", &[r(8), r(9), i(4)], false).unwrap();
         assert_eq!(w, 0x40c0);
     }
 
     #[test]
     fn reserved_values_rejected() {
-        assert!(encode("c.addi", &[r(1), i(0)]).is_err());
-        assert!(encode("c.addi4spn", &[r(8), i(2)]).is_err());
-        assert!(encode("c.addi4spn", &[r(4), i(4)]).is_err());
+        assert!(encode("c.addi", &[r(1), i(0)], false).is_err());
+        assert!(encode("c.addi4spn", &[r(8), i(2)], false).is_err());
+        assert!(encode("c.addi4spn", &[r(4), i(4)], false).is_err());
     }
 }
 
