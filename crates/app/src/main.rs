@@ -83,6 +83,8 @@ struct Shared {
     /// Calling-convention checker: pause when a return violates the
     /// preserved-register and stack-pointer rules (opt-in).
     check_cconv: RefCell<bool>,
+    /// Assemble c.* compressed instructions (opt-in; RARS has no equivalent).
+    allow_compressed: RefCell<bool>,
 }
 
 /// Every widget the behavior code needs, kept by handle. wxDragon handles are
@@ -165,6 +167,7 @@ fn main() {
             rv64: RefCell::new(false),
             memcheck: RefCell::new(false),
             check_cconv: RefCell::new(false),
+            allow_compressed: RefCell::new(false),
         });
         let narrator = Rc::new(Narrator::new());
 
@@ -1157,6 +1160,7 @@ fn do_assemble(widgets: &Widgets, shared: &Shared, narrator: &Narrator, cmd_tx: 
         &files,
         &rvasm::AsmConfig {
             rv64: *shared.rv64.borrow(),
+            allow_compressed: *shared.allow_compressed.borrow(),
             ..rvasm::AsmConfig::default()
         },
     );
@@ -1471,6 +1475,16 @@ fn show_settings_dialog(frame: &Frame, shared: &Rc<Shared>) {
     );
     sizer.add(&cconv, 0, SizerFlag::All, 4);
 
+    let compressed = CheckBox::builder(&panel)
+        .with_label("Assemble compressed (c.*) instructions")
+        .with_value(*shared.allow_compressed.borrow())
+        .build();
+    compressed.set_accessibility_label("Compressed instructions");
+    compressed.set_accessibility_description(
+        "Allow sixteen bit c dot instructions; applies the next time you assemble",
+    );
+    sizer.add(&compressed, 0, SizerFlag::All, 4);
+
     let close_btn = Button::builder(&panel).with_label("Close").build();
     close_btn.set_accessibility_label("Close settings");
     let dlg = dialog;
@@ -1478,6 +1492,7 @@ fn show_settings_dialog(frame: &Frame, shared: &Rc<Shared>) {
     let xlen_choice = xlen;
     let memcheck_box = memcheck;
     let cconv_box = cconv;
+    let compressed_box = compressed;
     let sh = shared.clone();
     close_btn.on_click(move |_| {
         if let Some(sel) = choice.get_selection() {
@@ -1492,6 +1507,7 @@ fn show_settings_dialog(frame: &Frame, shared: &Rc<Shared>) {
         }
         *sh.memcheck.borrow_mut() = memcheck_box.get_value();
         *sh.check_cconv.borrow_mut() = cconv_box.get_value();
+        *sh.allow_compressed.borrow_mut() = compressed_box.get_value();
         dlg.end_modal(ID_OK);
     });
     sizer.add(

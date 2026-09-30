@@ -36,5 +36,9 @@ AsAccess aims for drop-in compatibility with RARS course material: same memory m
 
 ## RV64 mode
 
-21. **The stack top stays 4-aligned in RV64.** RARS's fixed initial `$sp` (0x7fffeffc) is only four-byte aligned, so RV64 programs must keep their own eight-byte alignment before `sd`/`ld` (or enable the unaligned-access setting).
+21. **Initial `$sp` is 0x7fffeff8, two words below RARS's 0x7fffeffc.** RARS's fixed initial `$sp` is only four-byte aligned, which is not enough for RV64 doubleword `sd`/`ld` prologues; starting eight-byte aligned lets both word and doubleword stack frames work without an initial alignment adjustment.
 22. **`negw`, `sext.w`, `zext.*` pseudo-ops are not implemented yet**; the underlying instructions are. RARS's auipc-based label-form `ld` is replaced by the lui+`%lo` form, which is safe given the low-4GB memory map both tools share.
+
+## Extensions beyond RARS
+
+23. **The C compressed extension is opt-in per run.** Pass `--compressed` on the CLI (or enable compressed in the GUI settings) to assemble 16-bit `c.*` instructions and execute them. RARS has no compressed support, so course material never uses it; programs that stick to 32-bit instructions are unaffected either way.
