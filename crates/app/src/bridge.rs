@@ -105,6 +105,13 @@ pub enum Evt {
         pc: u32,
         instret: u64,
     },
+    /// One undone instruction in backstep mode; the text names what was
+    /// reverted so the UI can narrate it.
+    Backstepped {
+        text: String,
+        pc: u32,
+        instret: u64,
+    },
     /// The machine loaded a program and is back at its starting state.
     Loaded {
         pc: u32,
@@ -265,6 +272,20 @@ pub fn start_sim_thread(cmds: Receiver<Cmd>, events: EventSender, input: InputCh
                 Cmd::Backstep => {
                     if let Some(m) = machine.as_mut() {
                         if m.backstep() {
+                            // After the undo, the pc sits on the reverted
+                            // instruction; name it for narration.
+                            let text = m
+                                .program()
+                                .statement_at(m.pc())
+                                .map(|s| s.basic_text.to_string())
+                                .unwrap_or_else(|| "<unknown>".into());
+                            events
+                                .send(Evt::Backstepped {
+                                    text,
+                                    pc: m.pc(),
+                                    instret: m.instret(),
+                                })
+                                .ok();
                             send_state(&events, m);
                         }
                     }

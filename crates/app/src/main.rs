@@ -365,10 +365,12 @@ fn main() {
         // Program list: Enter toggles a breakpoint on the selected row.
         {
             let w = widgets.clone();
+            let sh = shared.clone();
+            let nar = narrator.clone();
             let tx = cmd_tx.clone();
             widgets.program_list.on_item_activated(move |event| {
                 let _ = event;
-                toggle_selected_breakpoint(&w, &tx);
+                toggle_selected_breakpoint(&w, &sh, &nar, &tx);
             });
         }
 
@@ -550,7 +552,12 @@ fn mark_program_pc(w: &Widgets, pc: u32) {
 }
 
 /// Toggle the breakpoint on the selected Program row.
-fn toggle_selected_breakpoint(w: &Widgets, cmd_tx: &Sender<Cmd>) {
+fn toggle_selected_breakpoint(
+    w: &Widgets,
+    shared: &Shared,
+    narrator: &Narrator,
+    cmd_tx: &Sender<Cmd>,
+) {
     let mut index = w.program_list.get_first_selected_item();
     if index < 0 {
         // No selection: fall back to the row at the current PC, else the
@@ -586,6 +593,20 @@ fn toggle_selected_breakpoint(w: &Widgets, cmd_tx: &Sender<Cmd>) {
         },
         0,
     );
+    // The row shows the new state, but say it: walking back to the row and
+    // reading the Breakpoint column is exactly the trip speech avoids.
+    let line = shared
+        .assembled
+        .borrow()
+        .as_ref()
+        .and_then(|p| p.statement_at(addr))
+        .map(|s| s.source.line)
+        .unwrap_or(0);
+    narrator.speak(narration::breakpoint_changed(
+        *shared.verbosity.borrow(),
+        on,
+        line,
+    ));
     cmd_tx.send(Cmd::SetBreakpoint { addr, on }).ok();
 }
 
@@ -645,6 +666,10 @@ fn handle_sim_event(
                 w.io_output.set_value("");
             }
             w.io_output.append_text(&text);
+            narrator.speak(narration::output_arrived(
+                *shared.verbosity.borrow(),
+                text.lines().count(),
+            ));
         }
         Evt::State(snapshot) => {
             let bridge::StateSnapshot {
@@ -698,6 +723,25 @@ fn handle_sim_event(
                 *shared.verbosity.borrow(),
                 &text,
                 &changes,
+            ));
+        }
+        Evt::Backstepped { text, pc, instret } => {
+            w.status_bar.set_status_text(
+                &format!("line {}, pc 0x{pc:08x}, {instret} executed", {
+                    let line = shared
+                        .assembled
+                        .borrow()
+                        .as_ref()
+                        .and_then(|p| p.statement_at(pc))
+                        .map(|s| s.source.line);
+                    line.unwrap_or(0)
+                }),
+                1,
+            );
+            narrator.speak(narration::backstep_done(
+                *shared.verbosity.borrow(),
+                &text,
+                &[],
             ));
         }
         Evt::Halted { halt, pc, instret } => {
@@ -1320,6 +1364,7 @@ fn bind_menu_events(
                 w.editor.set_text("");
                 *sh.program_path.borrow_mut() = None;
                 w.status_bar.set_status_text("New file", 0);
+                nar.speak(narration::file_action(*sh.verbosity.borrow(), "New file", None));
             }
             ID_OPEN => {
                 let dialog = FileDialog::builder(&fr)
@@ -1333,6 +1378,15 @@ fn bind_menu_events(
                                 w.editor.set_text(&text);
                                 *sh.program_path.borrow_mut() = Some(path.clone());
                                 w.status_bar.set_status_text(&format!("Opened {path}"), 0);
+                                let name = std::path::Path::new(&path)
+                                    .file_name()
+                                    .map(|f| f.to_string_lossy().into_owned())
+                                    .unwrap_or_else(|| path.clone());
+                                nar.speak(narration::file_action(
+                                    *sh.verbosity.borrow(),
+                                    "Opened",
+                                    Some(&name),
+                                ));
                             }
                             Err(e) => w
                                 .status_bar
@@ -1370,6 +1424,15 @@ fn bind_menu_events(
                     Ok(()) => {
                         *sh.program_path.borrow_mut() = Some(path.clone());
                         w.status_bar.set_status_text(&format!("Saved {path}"), 0);
+                        let name = std::path::Path::new(&path)
+                            .file_name()
+                            .map(|f| f.to_string_lossy().into_owned())
+                            .unwrap_or_else(|| path.clone());
+                        nar.speak(narration::file_action(
+                            *sh.verbosity.borrow(),
+                            "Saved",
+                            Some(&name),
+                        ));
                     }
                     Err(e) => w
                         .status_bar
@@ -1400,8 +1463,9 @@ fn bind_menu_events(
             }
             ID_RUN_RESET => {
                 tx.send(Cmd::Reset).ok();
+                nar.speak(narration::reset_done(*sh.verbosity.borrow()));
             }
-            ID_RUN_TOGGLE_BREAK => toggle_selected_breakpoint(&w, &tx),
+            ID_RUN_TOGGLE_BREAK => toggle_selected_breakpoint(&w, &sh, &nar, &tx),
             ID_RUN_TOGGLE_WATCH => toggle_selected_watchpoint(&w, &tx),
             ID_TOOL_FLOAT => {
                 tools_float::FloatRepTool::open();
