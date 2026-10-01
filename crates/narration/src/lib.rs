@@ -144,6 +144,46 @@ pub fn halted(v: Verbosity, halt: &Halt, instret: u64, location: Option<&str>) -
     Some(base)
 }
 
+/// Announcement after a reset: a state change with no focus change of its
+/// own, so the reader must confirm it happened.
+pub fn reset_done(v: Verbosity) -> Option<String> {
+    match v {
+        Verbosity::Off => None,
+        _ => Some("Program reset.".to_string()),
+    }
+}
+
+/// Announcement after a backstep. Same shape as step_done, prefixed so the
+/// two directions are never confused by ear.
+pub fn backstep_done(v: Verbosity, statement_text: &str, changes: &[Change]) -> Option<String> {
+    let inner = step_done(v, statement_text, changes)?;
+    Some(format!("Backstepped. {inner}"))
+}
+
+/// Announcement for a breakpoint toggle in the program list: the list row
+/// shows the new state, but speaking it saves the trip back to the row.
+pub fn breakpoint_changed(v: Verbosity, on: bool, line: u32) -> Option<String> {
+    match v {
+        Verbosity::Off => None,
+        _ => Some(format!(
+            "Breakpoint {} at line {line}.",
+            if on { "on" } else { "off" }
+        )),
+    }
+}
+
+/// Announcement for editor file actions. `name` is the file title when one
+/// applies (opened or saved path); None for actions like New.
+pub fn file_action(v: Verbosity, action: &str, name: Option<&str>) -> Option<String> {
+    match v {
+        Verbosity::Off => None,
+        _ => Some(match name {
+            Some(name) => format!("{action} {name}."),
+            None => format!("{action}."),
+        }),
+    }
+}
+
 /// New program output while the console is not focused. Bulk output is only
 /// summarized; verbose counts lines, brief just says output arrived.
 pub fn output_arrived(v: Verbosity, new_lines: usize) -> Option<String> {
@@ -230,6 +270,51 @@ mod tests {
             step_done(Verbosity::Verbose, "sw a0, 0(sp)", &changes).as_deref(),
             Some("sw a0, 0(sp). a0 is 5; wrote 4 bytes at 0x7fffeff0, now 5; continuing at 0x00400010")
         );
+    }
+
+    #[test]
+    fn reset_and_backstep_announcements() {
+        assert_eq!(
+            reset_done(Verbosity::Brief).as_deref(),
+            Some("Program reset.")
+        );
+        assert_eq!(reset_done(Verbosity::Off), None);
+        let changes = vec![Change::Reg {
+            index: 10,
+            old: 5,
+            new: 0,
+        }];
+        assert_eq!(
+            backstep_done(Verbosity::Brief, "li a0, 5", &changes).as_deref(),
+            Some("Backstepped. li a0, 5. a0 is 0")
+        );
+        assert_eq!(backstep_done(Verbosity::Off, "li a0, 5", &changes), None);
+    }
+
+    #[test]
+    fn breakpoint_toggle_announcements() {
+        assert_eq!(
+            breakpoint_changed(Verbosity::Brief, true, 5).as_deref(),
+            Some("Breakpoint on at line 5.")
+        );
+        assert_eq!(
+            breakpoint_changed(Verbosity::Brief, false, 5).as_deref(),
+            Some("Breakpoint off at line 5.")
+        );
+        assert_eq!(breakpoint_changed(Verbosity::Off, true, 5), None);
+    }
+
+    #[test]
+    fn file_action_announcements() {
+        assert_eq!(
+            file_action(Verbosity::Brief, "Opened", Some("demo.s")).as_deref(),
+            Some("Opened demo.s.")
+        );
+        assert_eq!(
+            file_action(Verbosity::Brief, "New file", None).as_deref(),
+            Some("New file.")
+        );
+        assert_eq!(file_action(Verbosity::Off, "Saved", Some("x.s")), None);
     }
 
     #[test]
