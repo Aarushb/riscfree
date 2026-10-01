@@ -41,6 +41,10 @@ mod prism_backend {
     pub struct PrismSpeaker {
         prism: prismer::Prism,
         name: String,
+        /// Set when a speak attempt fails, so `is_connected` stops claiming
+        /// health and the owner recreates the speaker on the next call
+        /// instead of silently dropping every announcement.
+        failed: bool,
     }
 
     impl PrismSpeaker {
@@ -51,7 +55,11 @@ mod prism_backend {
                 let backend = prism.acquire_best().ok()?;
                 backend.name()
             };
-            Some(PrismSpeaker { prism, name })
+            Some(PrismSpeaker {
+                prism,
+                name,
+                failed: false,
+            })
         }
 
         /// Names of every backend Prism knows about on this machine,
@@ -67,25 +75,35 @@ mod prism_backend {
             }
         }
 
-        fn with_backend(&self, f: impl FnOnce(&prismer::Backend)) {
-            if let Ok(backend) = self.prism.acquire_best() {
-                f(&backend);
+        /// Runs `f` with an acquired backend; false when acquisition or the
+        /// call itself failed, which marks this speaker wedged.
+        fn with_backend(&mut self, f: impl FnOnce(&prismer::Backend) -> bool) -> bool {
+            match self.prism.acquire_best() {
+                Ok(backend) => {
+                    if f(&backend) {
+                        true
+                    } else {
+                        self.failed = true;
+                        false
+                    }
+                }
+                Err(_) => {
+                    self.failed = true;
+                    false
+                }
             }
         }
     }
 
     impl Speaker for PrismSpeaker {
         fn speak(&mut self, text: &str, interrupt: bool) {
-            // Failure to speak is never fatal; the UI keeps working.
-            self.with_backend(|b| {
-                let _ = b.speak(text, interrupt);
-            });
+            // Failure to speak is never fatal; the UI keeps working and the
+            // owner recreates this speaker once it reports unhealthy.
+            self.with_backend(|b| b.speak(text, interrupt).is_ok());
         }
 
         fn stop(&mut self) {
-            self.with_backend(|b| {
-                let _ = b.stop();
-            });
+            self.with_backend(|b| b.stop().is_ok());
         }
 
         fn backend_name(&self) -> &str {
@@ -93,7 +111,7 @@ mod prism_backend {
         }
 
         fn is_connected(&self) -> bool {
-            self.prism.backend_count() > 0
+            !self.failed && self.prism.backend_count() > 0
         }
     }
 }
