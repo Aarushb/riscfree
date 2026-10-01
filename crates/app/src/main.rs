@@ -265,6 +265,12 @@ fn main() {
         let _ = right_splitter.split_horizontally(&register_notebook, &bottom_notebook, 380);
         let _ = h_splitter.split_vertically(&editor_panel, &right_splitter, 620);
 
+        // Deterministic editor tab exits: forward to the state notebook,
+        // backward to the Reset button (the last control before the editor).
+        if let Some((reset_btn, _)) = run_buttons.last() {
+            bind_editor_tab_keys(&editor, &register_notebook, reset_btn);
+        }
+
         main_sizer.add(&h_splitter, 1, SizerFlag::Expand, 0);
         panel.set_sizer(main_sizer, true);
 
@@ -895,19 +901,44 @@ fn build_menu_bar() -> MenuBar {
 }
 
 /// Key handling bound on the editor's own event handler. StyledTextCtrl does
-/// not implement wxDragon's WindowEvents, so this newtype bridges it: Tab and
-/// Shift+Tab move focus (the standard Windows multiline-edit convention) and
-/// Ctrl+Tab inserts the tab character. Without this, Scintilla consumes Tab
-/// as an indent command and keyboard focus is trapped in the editor.
-struct EditorKeys<'a>(&'a StyledTextCtrl);
+/// not implement wxDragon's WindowEvents, so this newtype bridges it.
+struct EditorKeys(StyledTextCtrl);
 
-impl WxEvtHandler for EditorKeys<'_> {
+impl WxEvtHandler for EditorKeys {
     unsafe fn get_event_handler_ptr(&self) -> *mut wxdragon::ffi::wxd_EvtHandler_t {
         self.0.get_event_handler_ptr()
     }
 }
 
-impl WindowEvents for EditorKeys<'_> {}
+impl WindowEvents for EditorKeys {}
+
+/// Tab and Shift+Tab move focus out of the editor; Ctrl+Tab inserts the tab
+/// character. The landing spots are explicit — the state notebook forward,
+/// the Reset button backward — because generic wx navigation started from a
+/// Scintilla inside the splitter hierarchy resolves its search point
+/// inconsistently and lands on seemingly random controls.
+fn bind_editor_tab_keys(editor: &StyledTextCtrl, next: &Notebook, prev: &Button) {
+    let handle = *editor;
+    let next = *next;
+    let prev = *prev;
+    EditorKeys(handle).on_key_down(move |data| {
+        if let WindowEventData::Keyboard(kb) = &data {
+            if kb.get_key_code() == Some(WXK_TAB) {
+                if kb.control_down() {
+                    let pos = handle.get_current_pos();
+                    handle.insert_text(pos, "\t");
+                } else if kb.shift_down() {
+                    prev.set_focus();
+                } else {
+                    next.set_focus();
+                }
+                // Handled here: do not skip, or Scintilla inserts a tab too.
+                return;
+            }
+        }
+        data.skip(true);
+    });
+}
 
 fn build_editor(parent: &Panel) -> StyledTextCtrl {
     let editor = StyledTextCtrl::builder(parent).build();
@@ -919,23 +950,6 @@ fn build_editor(parent: &Panel) -> StyledTextCtrl {
     editor.set_accessibility_description("RISC-V assembly source editor");
     #[cfg(target_os = "windows")]
     editor.set_accessibility_role(AccRole::Document);
-
-    EditorKeys(&editor).on_key_down(move |data| {
-        if let WindowEventData::Keyboard(kb) = &data {
-            if kb.get_key_code() == Some(WXK_TAB) {
-                if kb.control_down() {
-                    let pos = editor.get_current_pos();
-                    editor.insert_text(pos, "\t");
-                } else {
-                    editor.navigate(!kb.shift_down());
-                }
-                // Handled here: do not skip, or Scintilla inserts a tab too.
-                return;
-            }
-        }
-        data.skip(true);
-    });
-
     editor
 }
 
