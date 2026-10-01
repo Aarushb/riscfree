@@ -150,6 +150,23 @@ def main() -> int:
 
             set_app_focus(wrapper)
             started_on_editor = app_focus() == wrapper
+            # The editor's forward neighbor is the state notebook: Tab must
+            # land on its tab control, and the SAME one every time.
+            children = []
+            win32gui.EnumChildWindows(
+                hwnd, lambda h, _param: children.append(h), None
+            )
+            tabctls = [
+                h for h in children
+                if win32gui.GetClassName(h) == "_wx_SysTabCtl32"
+            ]
+            landings = []
+            for _ in range(3):
+                set_app_focus(wrapper)
+                post_key(wrapper, 0x09)  # Tab
+                time.sleep(0.3)
+                landings.append(app_focus())
+            deterministic = len(set(landings)) == 1 and landings[0] in tabctls
             root = iuia.ElementFromHandle(hwnd)
             els = root.FindAll(TreeScope_Descendants, iuia.CreateTrueCondition())
             before_value = None
@@ -158,9 +175,6 @@ def main() -> int:
                 if prop(e, UIA_ClassNamePropertyId) == "Scintilla":
                     before_value = prop(e, UIA_ValueValuePropertyId)
                     break
-            post_key(wrapper, 0x09)  # Tab
-            time.sleep(0.8)
-            focus_after = app_focus()
             els = root.FindAll(TreeScope_Descendants, iuia.CreateTrueCondition())
             after_value = None
             for i in range(els.Length):
@@ -168,12 +182,17 @@ def main() -> int:
                 if prop(e, UIA_ClassNamePropertyId) == "Scintilla":
                     after_value = prop(e, UIA_ValueValuePropertyId)
                     break
-            left = focus_after not in (0, wrapper, scintillas[0])
-            tab_ok = started_on_editor and left and before_value == after_value
+            left = all(h not in (0, wrapper, scintillas[0]) for h in landings)
+            tab_ok = (
+                started_on_editor
+                and deterministic
+                and left
+                and before_value == after_value
+            )
             step(
                 f"tab from editor: started_on_editor={started_on_editor}, "
-                f"focus left={left}, text unchanged="
-                f"{before_value == after_value} "
+                f"landed on notebook tab control={deterministic}, "
+                f"text unchanged={before_value == after_value} "
                 f"({'PASS' if tab_ok else 'FAIL'})"
             )
         else:
