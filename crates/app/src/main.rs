@@ -1527,21 +1527,6 @@ fn bind_menu_events(
 
 // --- Dialogs ---------------------------------------------------------------
 
-/// Escape closes the dialog, as keyboard users expect. wx ends a modal on
-/// Escape only when a cancel item exists; these dialogs have just Close.
-fn bind_escape_to_close(dialog: &Dialog) {
-    let handle = *dialog;
-    dialog.on_key_down(move |data| {
-        if let WindowEventData::Keyboard(kb) = &data {
-            if kb.get_key_code() == Some(WXK_ESCAPE) {
-                handle.end_modal(ID_OK);
-                return;
-            }
-        }
-        data.skip(true);
-    });
-}
-
 fn show_settings_dialog(frame: &Frame, shared: &Rc<Shared>) {
     let dialog = Dialog::builder(frame, "Settings")
         .with_style(DialogStyle::DefaultDialogStyle | DialogStyle::ResizeBorder)
@@ -1628,7 +1613,12 @@ fn show_settings_dialog(frame: &Frame, shared: &Rc<Shared>) {
     );
     sizer.add(&compressed, 0, SizerFlag::All, 4);
 
-    let close_btn = Button::builder(&panel).with_label("Close").build();
+    // wxID_CANCEL makes wx's dialog char hook close on Escape from anywhere
+    // in the dialog; the click handler still ends with ID_OK.
+    let close_btn = Button::builder(&panel)
+        .with_label("Close")
+        .with_id(ID_CANCEL)
+        .build();
     close_btn.set_accessibility_label("Close settings");
     let dlg = dialog;
     let choice = verbosity;
@@ -1665,7 +1655,6 @@ fn show_settings_dialog(frame: &Frame, shared: &Rc<Shared>) {
     dialog_sizer.add(&panel, 1, SizerFlag::Expand, 0);
     dialog.set_sizer(dialog_sizer, true);
 
-    bind_escape_to_close(&dialog);
     let _ = dialog.show_modal();
     dialog.destroy();
 }
@@ -1711,7 +1700,10 @@ fn show_shortcuts_dialog(frame: &Frame) {
     list.set_accessibility_label("Keyboard shortcuts list");
     sizer.add(&list, 1, SizerFlag::Expand | SizerFlag::All, 4);
 
-    let close_btn = Button::builder(&panel).with_label("Close").build();
+    let close_btn = Button::builder(&panel)
+        .with_label("Close")
+        .with_id(ID_CANCEL)
+        .build();
     close_btn.set_accessibility_label("Close keyboard shortcuts");
     let dlg = dialog;
     close_btn.on_click(move |_| {
@@ -1729,7 +1721,6 @@ fn show_shortcuts_dialog(frame: &Frame) {
     dialog_sizer.add(&panel, 1, SizerFlag::Expand, 0);
     dialog.set_sizer(dialog_sizer, true);
 
-    bind_escape_to_close(&dialog);
     let _ = dialog.show_modal();
     dialog.destroy();
 }
