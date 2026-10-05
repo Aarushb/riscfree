@@ -144,6 +144,16 @@ pub fn halted(v: Verbosity, halt: &Halt, instret: u64, location: Option<&str>) -
     Some(base)
 }
 
+/// Announcement when a run starts. Programs that block on console input
+/// produce neither output nor a halt for a while, and a silent run key
+/// sounds identical to a dead one.
+pub fn run_started(v: Verbosity) -> Option<String> {
+    match v {
+        Verbosity::Off => None,
+        _ => Some("Program running.".to_string()),
+    }
+}
+
 /// Announcement after a reset: a state change with no focus change of its
 /// own, so the reader must confirm it happened.
 pub fn reset_done(v: Verbosity) -> Option<String> {
@@ -270,6 +280,15 @@ mod tests {
             step_done(Verbosity::Verbose, "sw a0, 0(sp)", &changes).as_deref(),
             Some("sw a0, 0(sp). a0 is 5; wrote 4 bytes at 0x7fffeff0, now 5; continuing at 0x00400010")
         );
+    }
+
+    #[test]
+    fn run_started_announcement() {
+        assert_eq!(
+            run_started(Verbosity::Brief).as_deref(),
+            Some("Program running.")
+        );
+        assert_eq!(run_started(Verbosity::Off), None);
     }
 
     #[test]
