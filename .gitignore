@@ -37,3 +37,7 @@ desktop.ini
 /tests/uiauto/.venv/
 /tests/uiauto/*.log
 /tests/uiauto/uia_dump.txt
+
+# Files the example and corpus programs write when run from the repo root
+/asaccess-demo.txt
+/corpus_file.txt
