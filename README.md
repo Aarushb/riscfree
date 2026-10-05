@@ -8,7 +8,7 @@ I'm a visually impaired computing science student, and RARS is the simulator my 
 
 ## Status
 
-In active development, Windows first. Working today: the RV32IM+Zicsr+F/D assembler and machine with macros, MMIO devices, teaching and file syscalls, interrupts and traps, breakpoints with backstep, a headless CLI, and a wxDragon GUI with screen reader narration (NVDA, JAWS, and friends through Prism). Examples live in `examples/asm/`. Remaining toward RARS parity: RV64 mode, the remaining tools, and installer packaging.
+In active development, Windows first. Working today: the RV32/RV64 IM+Zicsr+F/D+C assembler and machine with macros, MMIO devices, teaching and file syscalls, interrupts and traps, breakpoints, watchpoints, memcheck, a calling-convention checker, backstep, JSON run traces for autograders, a headless CLI, and a wxDragon GUI with screen reader narration (NVDA, JAWS, and friends through Prism) plus the tools RARS has: bitmap display, digital lab sim, float representation, instruction counter, timer tool, and instruction decode. A 12-program differential corpus guards parity with RARS. Examples live in `examples/asm/`. Remaining: installer packaging and JAWS runtime verification.
 
 ## Documentation
 
