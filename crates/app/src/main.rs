@@ -273,7 +273,7 @@ fn main() {
         // Deterministic editor tab exits: forward to the state notebook,
         // backward to the Reset button (the last control before the editor).
         if let Some((reset_btn, _)) = run_buttons.last() {
-            bind_editor_tab_keys(&editor, &register_notebook, reset_btn);
+            bind_editor_keys(&editor, &register_notebook, reset_btn);
         }
 
         main_sizer.add(&h_splitter, 1, SizerFlag::Expand, 0);
@@ -981,12 +981,44 @@ impl WxEvtHandler for EditorKeys {
 
 impl WindowEvents for EditorKeys {}
 
-/// Tab and Shift+Tab move focus out of the editor; Ctrl+Tab inserts the tab
-/// character. The landing spots are explicit — the state notebook forward,
-/// the Reset button backward — because generic wx navigation started from a
-/// Scintilla inside the splitter hierarchy resolves its search point
-/// inconsistently and lands on seemingly random controls.
-fn bind_editor_tab_keys(editor: &StyledTextCtrl, next: &Notebook, prev: &Button) {
+/// Minimal user32 access for menu-bar activation from the editor. Scintilla
+/// consumes the Alt key, so a lone Alt press is forwarded to the frame as
+/// the standard menu-key system command. The handler runs on the UI thread,
+/// so GetFocus is the app's own focus and no thread attachment is needed.
+#[cfg(target_os = "windows")]
+mod menu_key {
+    #[link(name = "user32")]
+    extern "system" {
+        fn GetFocus() -> isize;
+        fn GetAncestor(hwnd: isize, flags: u32) -> isize;
+        fn PostMessageW(hwnd: isize, msg: u32, wparam: usize, lparam: isize) -> i32;
+    }
+    const GA_ROOT: u32 = 2;
+    const WM_SYSCOMMAND: u32 = 0x0112;
+    const SC_KEYMENU: usize = 0xF100;
+
+    pub fn open_menu_bar() {
+        unsafe {
+            let focus = GetFocus();
+            if focus == 0 {
+                return;
+            }
+            let root = GetAncestor(focus, GA_ROOT);
+            if root != 0 {
+                PostMessageW(root, WM_SYSCOMMAND, SC_KEYMENU, 0);
+            }
+        }
+    }
+}
+
+/// Editor key handling:
+/// - Tab and Shift+Tab move focus out; the landing spots are explicit (the
+///   state notebook forward, the Reset button backward) because generic wx
+///   navigation started from a Scintilla inside the splitter hierarchy
+///   resolves its search point inconsistently and lands on random controls.
+/// - Ctrl+Tab inserts the tab character.
+/// - A lone Alt opens the menu bar; Alt chords pass through to Scintilla.
+fn bind_editor_keys(editor: &StyledTextCtrl, next: &Notebook, prev: &Button) {
     let handle = *editor;
     let next = *next;
     let prev = *prev;
@@ -1002,6 +1034,16 @@ fn bind_editor_tab_keys(editor: &StyledTextCtrl, next: &Notebook, prev: &Button)
                     next.set_focus();
                 }
                 // Handled here: do not skip, or Scintilla inserts a tab too.
+                return;
+            }
+            if kb.get_key_code() == Some(WXK_ALT)
+                && !kb.control_down()
+                && !kb.shift_down()
+            {
+                // A lone Alt tap means the menu bar; Alt+key chords keep
+                // their Scintilla meaning (e.g. Alt+Shift+arrows).
+                #[cfg(target_os = "windows")]
+                menu_key::open_menu_bar();
                 return;
             }
         }
