@@ -6,23 +6,23 @@ not done while any box is unchecked.
 
 ## NVDA (primary Windows target)
 
-- [ ] App launches with NVDA running; focus lands in the editor and the window name is announced.
-- [ ] Tab order: toolbar buttons, editor, state notebook tabs, register list, program list, memory pane, Run I/O output, program input, Send.
-- [ ] Editor: typing is echoed; arrowing through lines reads code; line numbers do not pollute speech; error markers are perceivable (via the Assembler Messages route).
-- [ ] Editor: Tab and Shift+Tab move focus out of and back into the editor; Ctrl+Tab inserts a tab character (standard multiline-edit convention).
+- [x] App launches with NVDA running; focus lands in the editor and the window name is announced.
+- [x] Tab order: toolbar buttons, editor, state notebook tabs, register list, program list, memory pane, Run I/O output, program input, Send.
+- [x] Editor: typing is echoed; arrowing through lines reads code; line numbers do not pollute speech; error markers are perceivable (via the Assembler Messages route).
+- [x] Editor: Tab and Shift+Tab move focus out of and back into the editor; Ctrl+Tab inserts a tab character (standard multiline-edit convention).
 - [ ] Assemble with a deliberate error: brief announcement says "Assembly failed, N errors"; the Assembler Messages list reads severity, location, and message per row; Enter jumps the editor to the line.
-- [ ] Assemble clean: announcement "Assembled, N instructions, no errors."
-- [ ] F5 runs a printing program; output lands in the read-only Run I/O control and is traversable by line; the input line accepts text and Send forwards it to a reading program.
-- [ ] F7 step announces the executed line and changed registers (Brief); Verbose adds memory writes.
+- [x] Assemble clean: announcement "Assembled, N instructions, no errors."
+- [x] F5 runs a printing program; output lands in the read-only Run I/O control and is traversable by line; the input line accepts text and Send forwards it to a reading program.
+- [x] F7 step announces the executed line and changed registers (Brief); Verbose adds memory writes.
 - [ ] F8 backstep announces the undone state.
 - [ ] F5 from a breakpoint stop continues past it; re-arrival stops again.
-- [ ] Program exit announces "Program finished" with the instruction count.
-- [ ] Registers tab: rows read as "x10, a0, value"; decimal/hex formatting is what is spoken.
-- [ ] Program tab: Enter/Ctrl+D toggles a breakpoint and the Breakpoint column reads "on"; the PC row is identifiable.
+- [x] Program exit announces "Program finished" with the instruction count.
+- [x] Registers tab: rows read as "x10, a0, value"; decimal/hex formatting is what is spoken.
+- [x] Program tab: Enter/Ctrl+D toggles a breakpoint and the Breakpoint column reads "on"; the PC row is identifiable.
 - [ ] Memory tab: jump-to-address works; rows read address, hex bytes, ASCII.
 - [ ] Floating Point tab: rows read register name, float, double, bits.
 - [ ] Tools > Bitmap Display: grid rows read as hex pixel colors; changing base/size updates the grid.
-- [ ] F1 opens the shortcut dialog; the list is fully readable.
+- [x] F1 opens the shortcut dialog; the list is fully readable.
 - [ ] Settings verbosity Off silences all announcements; Verbose adds memory and location detail.
 
 ## JAWS (secondary Windows target)
@@ -41,4 +41,4 @@ not done while any box is unchecked.
 
 | Date | Screen reader + version | Tester | Result | Notes |
 |---|---|---|---|---|
-| | | | | |
+| 2026-10-05 | NVDA (Windows, via NVDA remote; version not recorded) | Aarush Bhat | Partial — unticked items still to verify | Interactive sessions; fixes applied and re-verified during testing: editor Tab focus with explicit neighbors, idle-pump lag, self-healing speech backend, dynamic announcements (assemble/run-start/reset/backstep/breakpoint/file/output), Escape via cancel-button convention, lone-Alt menu activation. F11 untestable under NVDA remote. |
