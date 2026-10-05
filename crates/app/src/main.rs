@@ -85,6 +85,10 @@ struct Shared {
     check_cconv: RefCell<bool>,
     /// Assemble c.* compressed instructions (opt-in; RARS has no equivalent).
     allow_compressed: RefCell<bool>,
+    /// When the last output-arrival announcement spoke. One print syscall
+    /// per chunk means a greeting like "Hello, name" lands as three Output
+    /// events; the announcement fires once per burst, not per chunk.
+    last_output_speak: RefCell<Option<std::time::Instant>>,
 }
 
 /// Every widget the behavior code needs, kept by handle. wxDragon handles are
@@ -168,6 +172,7 @@ fn main() {
             memcheck: RefCell::new(false),
             check_cconv: RefCell::new(false),
             allow_compressed: RefCell::new(false),
+            last_output_speak: RefCell::new(None),
         });
         let narrator = Rc::new(Narrator::new());
 
@@ -678,10 +683,18 @@ fn handle_sim_event(
                 w.io_output.set_value("");
             }
             w.io_output.append_text(&text);
-            narrator.speak(narration::output_arrived(
-                *shared.verbosity.borrow(),
-                text.lines().count(),
-            ));
+            const BURST: std::time::Duration = std::time::Duration::from_millis(500);
+            let due = {
+                let last = shared.last_output_speak.borrow();
+                last.is_none_or(|t| t.elapsed() >= BURST)
+            };
+            if due {
+                *shared.last_output_speak.borrow_mut() = Some(std::time::Instant::now());
+                narrator.speak(narration::output_arrived(
+                    *shared.verbosity.borrow(),
+                    text.lines().count(),
+                ));
+            }
         }
         Evt::State(snapshot) => {
             let bridge::StateSnapshot {
