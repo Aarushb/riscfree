@@ -29,17 +29,26 @@ The workspace has two kinds of crates. The core (`rvasm`, `rvm`, `narration`, `a
 
    This builds every backend the platform supports (NVDA, JAWS, SAPI, OneCore, UIA and friends).
 
-3. Per shell session, before building the GUI or speech crates:
+3. Per shell session, before building the GUI or speech crates, two VS Build Tools folders must be on PATH: MSVC `link.exe`, and the standalone CMake **Ninja** folder (`...\Common7\IDE\CommonExtensions\Microsoft\CMake\Ninja`), whose `ninja.exe` both debug and release builds of the wxDragon C++ glue need. `LIBCLANG_PATH`, `PRISM_LIB_DIR`, and `CMAKE` are set workspace-wide by `.cargo/config.toml`:
 
    ```bash
-   export PRISM_LIB_DIR="$(pwd)/target/prism-install/lib"
-   export PATH="$(pwd)/target/prism-install/bin:$PATH"                # prism.dll at runtime
    export PATH="/c/Program Files (x86)/Microsoft Visual Studio/18/BuildTools/VC/Tools/MSVC/<ver>/bin/Hostx64/x64:$PATH"
-   export PATH="/c/Program Files (x86)/Microsoft Visual Studio/18/BuildTools/Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/bin:$PATH"
+   export PATH="/c/Program Files (x86)/Microsoft Visual Studio/18/BuildTools/Common7/IDE/CommonExtensions/Microsoft/CMake/Ninja:$PATH"
    export LIBCLANG_PATH="$(pwd)/tests/uiauto/.venv/Lib/site-packages/clang/native"
    ```
 
-A `scripts/dev-env.ps1` may automate step 3 later; for now this file is the source of truth.
+A `scripts/dev-env.ps1` may automate this later; for now this file is the source of truth.
+
+## Packaging (portable zip)
+
+The distribution is a plain zip: no installer UI to verify with a screen reader, no admin rights, updates by replacing the files.
+
+```bash
+cargo build --release -p asaccess -p asaccess-cli
+python scripts/package.py
+```
+
+The zip lands in `target/dist/asaccess-<version>-windows-x64.zip` with the GUI exe, the headless CLI, `prism.dll` (staged beside the binaries by the build), and a `FIRST-RUN.txt` pointing at F1 for shortcuts and the File > Reconnect speech fallback.
 
 ## Verifying
 
