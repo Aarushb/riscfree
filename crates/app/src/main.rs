@@ -299,12 +299,16 @@ fn main() {
                     btn.on_click(move |_| do_assemble(&w, &sh, &nar, &tx));
                 }
                 "Run" => {
+                    let sh = shared.clone();
+                    let nar = narrator.clone();
                     let tx = cmd_tx.clone();
                     let sb = widgets.status_bar;
                     btn.on_click(move |_| {
                         if tx.send(Cmd::Run).is_err() {
                             sb.set_status_text("Simulation thread is not responding", 0);
+                            return;
                         }
+                        nar.speak(narration::run_started(*sh.verbosity.borrow()));
                     });
                 }
                 "Step" => {
@@ -552,6 +556,14 @@ fn mark_program_pc(w: &Widgets, pc: u32) {
 }
 
 /// Toggle the breakpoint on the selected Program row.
+/// Start a run and say so: programs that block on console input produce
+/// neither output nor a halt for a while, and a silent run key sounds
+/// identical to a dead one.
+fn run_program(shared: &Shared, narrator: &Narrator, tx: &Sender<bridge::Cmd>) {
+    tx.send(bridge::Cmd::Run).ok();
+    narrator.speak(narration::run_started(*shared.verbosity.borrow()));
+}
+
 fn toggle_selected_breakpoint(
     w: &Widgets,
     shared: &Shared,
@@ -1365,6 +1377,7 @@ fn bind_menu_events(
                 *sh.program_path.borrow_mut() = None;
                 w.status_bar.set_status_text("New file", 0);
                 nar.speak(narration::file_action(*sh.verbosity.borrow(), "New file", None));
+                w.editor.set_focus();
             }
             ID_OPEN => {
                 let dialog = FileDialog::builder(&fr)
@@ -1446,9 +1459,7 @@ fn bind_menu_events(
             }
             ID_EXIT => fr.close(true),
             ID_RUN_ASSEMBLE => do_assemble(&w, &sh, &nar, &tx),
-            ID_RUN_RUN => {
-                tx.send(Cmd::Run).ok();
-            }
+            ID_RUN_RUN => run_program(&sh, &nar, &tx),
             ID_RUN_STEP => {
                 tx.send(Cmd::Step).ok();
             }
