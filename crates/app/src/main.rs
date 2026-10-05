@@ -1017,38 +1017,69 @@ mod menu_key {
 ///   navigation started from a Scintilla inside the splitter hierarchy
 ///   resolves its search point inconsistently and lands on random controls.
 /// - Ctrl+Tab inserts the tab character.
-/// - A lone Alt opens the menu bar; Alt chords pass through to Scintilla.
+/// - A lone Alt tap (down, up, nothing between) opens the menu bar; Alt
+///   chords pass through to Scintilla.
 fn bind_editor_keys(editor: &StyledTextCtrl, next: &Notebook, prev: &Button) {
     let handle = *editor;
     let next = *next;
     let prev = *prev;
-    EditorKeys(handle).on_key_down(move |data| {
-        if let WindowEventData::Keyboard(kb) = &data {
-            if kb.get_key_code() == Some(WXK_TAB) {
-                if kb.control_down() {
-                    let pos = handle.get_current_pos();
-                    handle.insert_text(pos, "\t");
-                } else if kb.shift_down() {
-                    prev.set_focus();
-                } else {
-                    next.set_focus();
+    // Alt-down cannot know yet whether a chord follows, so the menu fires
+    // only on Alt-up with no intervening key.
+    let alt_pending_flag = Rc::new(RefCell::new(false));
+    {
+        let alt_pending = alt_pending_flag.clone();
+        EditorKeys(handle).on_key_down(move |data| {
+            if let WindowEventData::Keyboard(kb) = &data {
+                if kb.get_key_code() == Some(WXK_ALT)
+                    && !kb.control_down()
+                    && !kb.shift_down()
+                {
+                    *alt_pending.borrow_mut() = true;
+                    return;
                 }
-                // Handled here: do not skip, or Scintilla inserts a tab too.
-                return;
+                if *alt_pending.borrow() {
+                    // A key arrived while Alt was held: it is a chord
+                    // (Alt+Tab, Alt+Shift+arrows), so hand it on and cancel
+                    // the pending menu.
+                    *alt_pending.borrow_mut() = false;
+                    data.skip(true);
+                    return;
+                }
+                if kb.get_key_code() == Some(WXK_TAB) && !kb.alt_down() {
+                    if kb.control_down() {
+                        let pos = handle.get_current_pos();
+                        handle.insert_text(pos, "\t");
+                    } else if kb.shift_down() {
+                        prev.set_focus();
+                    } else {
+                        next.set_focus();
+                    }
+                    // Handled here: do not skip, or Scintilla inserts a tab
+                    // too.
+                    return;
+                }
             }
-            if kb.get_key_code() == Some(WXK_ALT)
-                && !kb.control_down()
-                && !kb.shift_down()
-            {
-                // A lone Alt tap means the menu bar; Alt+key chords keep
-                // their Scintilla meaning (e.g. Alt+Shift+arrows).
-                #[cfg(target_os = "windows")]
-                menu_key::open_menu_bar();
-                return;
+            data.skip(true);
+        });
+    }
+    {
+        let alt_pending = alt_pending_flag.clone();
+        EditorKeys(handle).on_key_up(move |data| {
+            if let WindowEventData::Keyboard(kb) = &data {
+                if kb.get_key_code() == Some(WXK_ALT)
+                    && !kb.control_down()
+                    && !kb.shift_down()
+                    && *alt_pending.borrow()
+                {
+                    *alt_pending.borrow_mut() = false;
+                    #[cfg(target_os = "windows")]
+                    menu_key::open_menu_bar();
+                    return;
+                }
             }
-        }
-        data.skip(true);
-    });
+            data.skip(true);
+        });
+    }
 }
 
 fn build_editor(parent: &Panel) -> StyledTextCtrl {
