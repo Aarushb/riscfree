@@ -1565,7 +1565,7 @@ fn bind_menu_events(
                         .set_status_text(&format!("Cannot save {path}: {e}"), 0),
                 }
             }
-            ID_SETTINGS => show_settings_dialog(&fr, &sh),
+            ID_SETTINGS => show_settings_dialog(&fr, &sh, &nar),
             ID_RECONNECT_SPEECH => {
                 nar.reconnect();
                 w.status_bar.set_status_text(&nar.backend_summary(), 0);
@@ -1640,7 +1640,7 @@ fn bind_menu_events(
 
 // --- Dialogs ---------------------------------------------------------------
 
-fn show_settings_dialog(frame: &Frame, shared: &Rc<Shared>) {
+fn show_settings_dialog(frame: &Frame, shared: &Rc<Shared>, narrator: &Rc<Narrator>) {
     let dialog = Dialog::builder(frame, "Settings")
         .with_style(DialogStyle::DefaultDialogStyle | DialogStyle::ResizeBorder)
         .with_size(420, 200)
@@ -1726,13 +1726,25 @@ fn show_settings_dialog(frame: &Frame, shared: &Rc<Shared>) {
     );
     sizer.add(&compressed, 0, SizerFlag::All, 4);
 
-    // wxID_CANCEL makes wx's dialog char hook close on Escape from anywhere
-    // in the dialog; the click handler still ends with ID_OK.
-    let close_btn = Button::builder(&panel)
-        .with_label("Close")
+    // Standard dialog semantics: OK applies and closes (Enter, default),
+    // Cancel discards (Escape, via the ID_CANCEL convention). Nothing
+    // applies until OK, so the save moment is explicit and announced.
+    let btn_row = BoxSizer::builder(Orientation::Horizontal).build();
+    let ok_btn = Button::builder(&panel)
+        .with_label("OK")
+        .with_id(ID_OK)
+        .build();
+    ok_btn.set_accessibility_label("Apply settings and close");
+    ok_btn.set_default();
+    let cancel_btn = Button::builder(&panel)
+        .with_label("Cancel")
         .with_id(ID_CANCEL)
         .build();
-    close_btn.set_accessibility_label("Close settings");
+    cancel_btn.set_accessibility_label("Close settings without applying");
+    btn_row.add(&ok_btn, 0, SizerFlag::All, 4);
+    btn_row.add(&cancel_btn, 0, SizerFlag::All, 4);
+    sizer.add_sizer(&btn_row, 0, SizerFlag::AlignCenterHorizontal, 0);
+
     let dlg = dialog;
     let choice = verbosity;
     let xlen_choice = xlen;
@@ -1740,7 +1752,8 @@ fn show_settings_dialog(frame: &Frame, shared: &Rc<Shared>) {
     let cconv_box = cconv;
     let compressed_box = compressed;
     let sh = shared.clone();
-    close_btn.on_click(move |_| {
+    let nar = narrator.clone();
+    ok_btn.on_click(move |_| {
         if let Some(sel) = choice.get_selection() {
             *sh.verbosity.borrow_mut() = match sel {
                 0 => Verbosity::Off,
@@ -1754,14 +1767,17 @@ fn show_settings_dialog(frame: &Frame, shared: &Rc<Shared>) {
         *sh.memcheck.borrow_mut() = memcheck_box.get_value();
         *sh.check_cconv.borrow_mut() = cconv_box.get_value();
         *sh.allow_compressed.borrow_mut() = compressed_box.get_value();
+        nar.speak(narration::file_action(
+            *sh.verbosity.borrow(),
+            "Settings applied",
+            None,
+        ));
         dlg.end_modal(ID_OK);
     });
-    sizer.add(
-        &close_btn,
-        0,
-        SizerFlag::AlignCenterHorizontal | SizerFlag::All,
-        8,
-    );
+    let dlg_for_cancel = dlg;
+    cancel_btn.on_click(move |_| {
+        dlg_for_cancel.end_modal(ID_CANCEL);
+    });
 
     panel.set_sizer(sizer, true);
     let dialog_sizer = BoxSizer::builder(Orientation::Vertical).build();
@@ -1813,14 +1829,11 @@ fn show_shortcuts_dialog(frame: &Frame) {
     list.set_accessibility_label("Keyboard shortcuts list");
     sizer.add(&list, 1, SizerFlag::Expand | SizerFlag::All, 4);
 
-    // ID_CANCEL keeps Escape closing the dialog; set_default makes Enter
-    // press the same button, so both dismiss keys work.
     let close_btn = Button::builder(&panel)
         .with_label("Close")
         .with_id(ID_CANCEL)
         .build();
     close_btn.set_accessibility_label("Close keyboard shortcuts");
-    close_btn.set_default();
     let dlg = dialog;
     close_btn.on_click(move |_| {
         dlg.end_modal(ID_OK);
