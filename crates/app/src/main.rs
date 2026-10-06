@@ -1829,11 +1829,14 @@ fn show_shortcuts_dialog(frame: &Frame) {
     list.set_accessibility_label("Keyboard shortcuts list");
     sizer.add(&list, 1, SizerFlag::Expand | SizerFlag::All, 4);
 
+    // ID_CANCEL keeps Escape closing the dialog; set_default makes Enter
+    // press the same button, so both dismiss keys work.
     let close_btn = Button::builder(&panel)
         .with_label("Close")
         .with_id(ID_CANCEL)
         .build();
     close_btn.set_accessibility_label("Close keyboard shortcuts");
+    close_btn.set_default();
     let dlg = dialog;
     close_btn.on_click(move |_| {
         dlg.end_modal(ID_OK);
