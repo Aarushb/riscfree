@@ -1734,13 +1734,11 @@ fn show_settings_dialog(frame: &Frame, shared: &Rc<Shared>, narrator: &Rc<Narrat
         .with_label("OK")
         .with_id(ID_OK)
         .build();
-    ok_btn.set_accessibility_label("Apply settings and close");
     ok_btn.set_default();
     let cancel_btn = Button::builder(&panel)
         .with_label("Cancel")
         .with_id(ID_CANCEL)
         .build();
-    cancel_btn.set_accessibility_label("Close settings without applying");
     btn_row.add(&ok_btn, 0, SizerFlag::All, 4);
     btn_row.add(&cancel_btn, 0, SizerFlag::All, 4);
     sizer.add_sizer(&btn_row, 0, SizerFlag::AlignCenterHorizontal, 0);
