@@ -460,8 +460,12 @@ fn main() {
             });
         }
 
+        // IDEs open full-screen real estate; the requested size is the
+        // restored (un-maximized) geometry. A floor keeps the splitter
+        // layout from being crushed on small screens.
+        widgets.frame.set_min_size(Size::new(880, 520));
+        widgets.frame.maximize(true);
         widgets.frame.show(true);
-        widgets.frame.centre();
     });
 }
 
