@@ -852,8 +852,23 @@ thread_local! {
     static PROGRAM_ADDRS: RefCell<Vec<u32>> = const { RefCell::new(Vec::new()) };
     /// Backing rows for the Memory tab: address, hex bytes, ASCII.
     static MEMORY_ROWS: RefCell<Vec<[String; 3]>> = const { RefCell::new(Vec::new()) };
-    /// Backing rows for the Floating Point tab.
-    static FP_ROWS: RefCell<Vec<[String; 5]>> = const { RefCell::new(Vec::new()) };
+    /// Backing rows for the Floating Point tab. Seeded with all 32 rows so
+    /// the virtual list reads values before the first run; refresh_fp_registers
+    /// only mutates existing rows, so an empty seed would stay empty forever
+    /// and every row would announce as a bare "list item".
+    static FP_ROWS: RefCell<Vec<[String; 5]>> = RefCell::new(
+        (0..32)
+            .map(|i| {
+                [
+                    format!("f{i}"),
+                    fp_abi_name(i).to_string(),
+                    String::new(),
+                    String::new(),
+                    String::new(),
+                ]
+            })
+            .collect(),
+    );
     /// Latest seven-segment display register bytes, for the Digital Lab Sim
     /// tool's display refresh.
     static DISPLAYS: RefCell<[u8; 2]> = const { RefCell::new([0; 2]) };
@@ -867,6 +882,17 @@ const ABI: &[&str] = &[
 
 fn reg_name(index: usize) -> &'static str {
     ABI.get(index).copied().unwrap_or("??")
+}
+
+/// Standard RISC-V floating-point ABI names: ft0-ft7, fs0-fs1, fa0-fa7,
+/// fs2-fs11, ft8-ft11.
+fn fp_abi_name(index: usize) -> &'static str {
+    const FP_ABI: &[&str] = &[
+        "ft0", "ft1", "ft2", "ft3", "ft4", "ft5", "ft6", "ft7", "fs0", "fs1", "fa0", "fa1", "fa2",
+        "fa3", "fa4", "fa5", "fa6", "fa7", "fs2", "fs3", "fs4", "fs5", "fs6", "fs7", "fs8", "fs9",
+        "fs10", "fs11", "ft8", "ft9", "ft10", "ft11",
+    ];
+    FP_ABI.get(index).copied().unwrap_or("??")
 }
 
 fn format_reg(v: u64) -> String {
@@ -1030,10 +1056,7 @@ fn bind_editor_keys(editor: &StyledTextCtrl, next: &Notebook, prev: &Button) {
         let alt_pending = alt_pending_flag.clone();
         EditorKeys(handle).on_key_down(move |data| {
             if let WindowEventData::Keyboard(kb) = &data {
-                if kb.get_key_code() == Some(WXK_ALT)
-                    && !kb.control_down()
-                    && !kb.shift_down()
-                {
+                if kb.get_key_code() == Some(WXK_ALT) && !kb.control_down() && !kb.shift_down() {
                     *alt_pending.borrow_mut() = true;
                     return;
                 }
@@ -1462,7 +1485,11 @@ fn bind_menu_events(
                 w.editor.set_text("");
                 *sh.program_path.borrow_mut() = None;
                 w.status_bar.set_status_text("New file", 0);
-                nar.speak(narration::file_action(*sh.verbosity.borrow(), "New file", None));
+                nar.speak(narration::file_action(
+                    *sh.verbosity.borrow(),
+                    "New file",
+                    None,
+                ));
                 w.editor.set_focus();
             }
             ID_OPEN => {
@@ -1786,11 +1813,14 @@ fn show_shortcuts_dialog(frame: &Frame) {
     list.set_accessibility_label("Keyboard shortcuts list");
     sizer.add(&list, 1, SizerFlag::Expand | SizerFlag::All, 4);
 
+    // ID_CANCEL keeps Escape closing the dialog; set_default makes Enter
+    // press the same button, so both dismiss keys work.
     let close_btn = Button::builder(&panel)
         .with_label("Close")
         .with_id(ID_CANCEL)
         .build();
     close_btn.set_accessibility_label("Close keyboard shortcuts");
+    close_btn.set_default();
     let dlg = dialog;
     close_btn.on_click(move |_| {
         dlg.end_modal(ID_OK);
