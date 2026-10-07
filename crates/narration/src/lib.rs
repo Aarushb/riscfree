@@ -144,6 +144,23 @@ pub fn halted(v: Verbosity, halt: &Halt, instret: u64, location: Option<&str>) -
     Some(base)
 }
 
+/// Announcement when the user pauses a run (F9).
+pub fn run_paused(v: Verbosity) -> Option<String> {
+    match v {
+        Verbosity::Off => None,
+        _ => Some("Paused.".to_string()),
+    }
+}
+
+/// Announcement when the user stops a run (F11), distinct from a halt the
+/// program reached on its own.
+pub fn run_stopped(v: Verbosity) -> Option<String> {
+    match v {
+        Verbosity::Off => None,
+        _ => Some("Program stopped.".to_string()),
+    }
+}
+
 /// Announcement when a run starts. Programs that block on console input
 /// produce neither output nor a halt for a while, and a silent run key
 /// sounds identical to a dead one.
@@ -280,6 +297,14 @@ mod tests {
             step_done(Verbosity::Verbose, "sw a0, 0(sp)", &changes).as_deref(),
             Some("sw a0, 0(sp). a0 is 5; wrote 4 bytes at 0x7fffeff0, now 5; continuing at 0x00400010")
         );
+    }
+
+    #[test]
+    fn pause_and_stop_announcements() {
+        assert_eq!(run_paused(Verbosity::Brief).as_deref(), Some("Paused."));
+        assert_eq!(run_stopped(Verbosity::Brief).as_deref(), Some("Program stopped."));
+        assert_eq!(run_paused(Verbosity::Off), None);
+        assert_eq!(run_stopped(Verbosity::Off), None);
     }
 
     #[test]
