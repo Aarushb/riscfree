@@ -328,10 +328,22 @@ fn main() {
                         tx.send(Cmd::Backstep).ok();
                     });
                 }
-                "Pause" | "Stop" => {
+                "Pause" => {
+                    let sh = shared.clone();
+                    let nar = narrator.clone();
                     let tx = cmd_tx.clone();
                     btn.on_click(move |_| {
                         tx.send(Cmd::Pause).ok();
+                        nar.speak(narration::run_paused(*sh.verbosity.borrow()));
+                    });
+                }
+                "Stop" => {
+                    let sh = shared.clone();
+                    let nar = narrator.clone();
+                    let tx = cmd_tx.clone();
+                    btn.on_click(move |_| {
+                        tx.send(Cmd::Pause).ok();
+                        nar.speak(narration::run_stopped(*sh.verbosity.borrow()));
                     });
                 }
                 "Reset" => {
@@ -1620,9 +1632,11 @@ fn bind_menu_events(
             }
             ID_RUN_PAUSE => {
                 tx.send(Cmd::Pause).ok();
+                nar.speak(narration::run_paused(*sh.verbosity.borrow()));
             }
             ID_RUN_STOP => {
                 tx.send(Cmd::Pause).ok();
+                nar.speak(narration::run_stopped(*sh.verbosity.borrow()));
             }
             ID_RUN_RESET => {
                 tx.send(Cmd::Reset).ok();
