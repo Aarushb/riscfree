@@ -1109,6 +1109,36 @@ fn bind_editor_keys(editor: &StyledTextCtrl, next: &Notebook, prev: &Button) {
     }
 }
 
+/// Event bridge for report lists (ListCtrl does not implement
+/// WindowEvents), used by the last-column stretch.
+pub(crate) struct ListEvents(pub ListCtrl);
+
+impl WxEvtHandler for ListEvents {
+    unsafe fn get_event_handler_ptr(&self) -> *mut wxdragon::ffi::wxd_EvtHandler_t {
+        self.0.get_event_handler_ptr()
+    }
+}
+
+impl WindowEvents for ListEvents {}
+
+/// Stretch a report list's last column over the leftover header width so
+/// the header reads as a finished table instead of trailing into an
+/// unnamed empty stub. Re-applies on every resize.
+pub(crate) fn stretch_last_column(list: &ListCtrl, columns: i64) {
+    let handle = *list;
+    ListEvents(handle).on_size(move |_| {
+        let client_w = handle.get_client_size().width;
+        let mut used = 0;
+        for c in 0..columns.saturating_sub(1) {
+            used += handle.get_column_width(c);
+        }
+        // Skip degenerate widths mid-drag so the last column stays usable.
+        if client_w > used + 60 {
+            handle.set_column_width(columns - 1, client_w - used);
+        }
+    });
+}
+
 fn build_editor(parent: &Panel) -> StyledTextCtrl {
     let editor = StyledTextCtrl::builder(parent).build();
     editor.set_text(SAMPLE_RISCV);
@@ -1148,6 +1178,7 @@ fn build_state_views(
     list.insert_column(0, "Reg", ListColumnFormat::Left, 60);
     list.insert_column(1, "Name", ListColumnFormat::Left, 90);
     list.insert_column(2, "Value", ListColumnFormat::Left, 200);
+    stretch_last_column(&list, 3);
     list.set_item_count(32);
     assert!(list.set_virtual_text_callback(move |item, col| {
         REGISTERS.with(|rows| {
@@ -1180,6 +1211,7 @@ fn build_state_views(
     prog_list.insert_column(2, "Code", ListColumnFormat::Left, 260);
     prog_list.insert_column(3, "Breakpoint", ListColumnFormat::Left, 90);
     prog_list.insert_column(4, "Current", ListColumnFormat::Left, 70);
+    stretch_last_column(&prog_list, 5);
     prog_list.set_item_count(0);
     assert!(prog_list.set_virtual_text_callback(move |item, col| {
         PROGRAM_ROWS.with(|rows| {
@@ -1233,6 +1265,7 @@ fn build_state_views(
     mem_list.insert_column(0, "Address", ListColumnFormat::Left, 100);
     mem_list.insert_column(1, "Bytes", ListColumnFormat::Left, 340);
     mem_list.insert_column(2, "ASCII", ListColumnFormat::Left, 170);
+    stretch_last_column(&mem_list, 3);
     mem_list.set_item_count(0);
     assert!(mem_list.set_virtual_text_callback(move |item, col| {
         MEMORY_ROWS.with(|rows| {
@@ -1265,6 +1298,7 @@ fn build_state_views(
     fp_list.insert_column(2, "Float", ListColumnFormat::Left, 170);
     fp_list.insert_column(3, "Double", ListColumnFormat::Left, 190);
     fp_list.insert_column(4, "Bits (hex)", ListColumnFormat::Left, 130);
+    stretch_last_column(&fp_list, 5);
     fp_list.set_item_count(32);
     assert!(fp_list.set_virtual_text_callback(move |item, col| {
         FP_ROWS.with(|rows| {
@@ -1354,6 +1388,7 @@ fn build_bottom_views(parent: &SplitterWindow) -> (Notebook, TextCtrl, TextCtrl,
     messages.insert_column(0, "Severity", ListColumnFormat::Left, 80);
     messages.insert_column(1, "Where", ListColumnFormat::Left, 150);
     messages.insert_column(2, "Message", ListColumnFormat::Left, 420);
+    stretch_last_column(&messages, 3);
     messages.set_accessibility_label("Assembler messages");
     messages.set_accessibility_description("Assembly errors and warnings");
     msg_sizer.add(&messages, 1, SizerFlag::Expand | SizerFlag::All, 2);
@@ -1824,6 +1859,7 @@ fn show_shortcuts_dialog(frame: &Frame) {
         .build();
     list.insert_column(0, "Action", ListColumnFormat::Left, 240);
     list.insert_column(1, "Shortcut", ListColumnFormat::Left, 160);
+    stretch_last_column(&list, 2);
     for (i, (action, key)) in shortcuts.iter().enumerate() {
         let idx = list.insert_item(i as i64, action, None);
         list.set_item_text_by_column(idx as i64, 1, key);

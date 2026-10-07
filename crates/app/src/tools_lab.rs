@@ -170,6 +170,7 @@ impl InstructionCounter {
         list.insert_column(0, "Opcode", ListColumnFormat::Left, 100);
         list.insert_column(1, "Instruction", ListColumnFormat::Left, 140);
         list.insert_column(2, "Count", ListColumnFormat::Left, 140);
+        crate::stretch_last_column(&list, 3);
         list.set_item_count(0);
         let counts_store: Rc<std::cell::RefCell<Vec<(u32, u64)>>> =
             Rc::new(std::cell::RefCell::new(Vec::new()));
