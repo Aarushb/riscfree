@@ -40,6 +40,7 @@ Once built, open any `.s` file, press F3 to assemble and F5 to run. Examples for
 
 ## Documentation
 
+- [Using](docs/USING.md): the walkthrough for keyboard and screen reader users, plus the CLI reference.
 - [Building](docs/BUILDING.md): toolchain setup, the Prism build, and packaging the portable zip.
 - [Compatibility](docs/COMPAT.md): every deliberate behavior difference from RARS, listed so ported course material can be reasoned about.
 - [Screen reader checklist](docs/SR-CHECKLIST.md): the verification pass every release runs, with results.
