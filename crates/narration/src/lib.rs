@@ -40,7 +40,8 @@ pub fn assemble_done(
         return None;
     }
     if ok {
-        let mut text = format!("Assembled. {instructions} instructions, no errors.");
+        let plural = if instructions == 1 { "" } else { "s" };
+        let mut text = format!("Assembled. {instructions} instruction{plural}, no errors.");
         if v == Verbosity::Verbose {
             text = format!("{text} Ready to run.");
         }
@@ -110,7 +111,10 @@ pub fn halted(v: Verbosity, halt: &Halt, instret: u64, location: Option<&str>) -
     if v == Verbosity::Off {
         return None;
     }
-    let count = format!("{instret} instructions executed");
+    let count = format!(
+        "{instret} instruction{} executed",
+        if instret == 1 { "" } else { "s" }
+    );
     let base = match halt {
         Halt::Exit { code } => {
             if *code == 0 {
@@ -242,6 +246,10 @@ mod tests {
         assert_eq!(
             assemble_done(Verbosity::Brief, true, 42, 0, None).as_deref(),
             Some("Assembled. 42 instructions, no errors.")
+        );
+        assert_eq!(
+            assemble_done(Verbosity::Brief, true, 1, 0, None).as_deref(),
+            Some("Assembled. 1 instruction, no errors.")
         );
         assert_eq!(
             assemble_done(Verbosity::Verbose, true, 42, 0, None).as_deref(),
