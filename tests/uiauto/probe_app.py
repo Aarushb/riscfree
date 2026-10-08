@@ -1,4 +1,4 @@
-"""UIA accessibility probe for the AsAccess wxDragon spike (Phase 0 / Spike 1).
+"""UIA accessibility probe for the RISC-Free wxDragon spike (Phase 0 / Spike 1).
 
 Starts the built debug exe and dumps the UIA element tree (via UI Automation
 FindAll, the same backend pywinauto's 'uia' backend is built on) to
@@ -53,7 +53,7 @@ from comtypes.gen.UIAutomationClient import (  # noqa: E402
 REPO = Path(__file__).resolve().parents[2]
 # The binary under test can be passed as argv[1]; the spike build is the
 # historical default.
-EXE = Path(sys.argv[1]) if len(sys.argv) > 1 else REPO / "target-spike" / "debug" / "asaccess.exe"
+EXE = Path(sys.argv[1]) if len(sys.argv) > 1 else REPO / "target-spike" / "debug" / "riscfree.exe"
 OUT = Path(__file__).resolve().parent / "uia_dump.txt"
 SLOG = Path(__file__).resolve().parent / "probe_steps.log"
 _slog = SLOG.open("w", encoding="utf-8")
@@ -176,7 +176,7 @@ def main():
         deadline = time.time() + 60
         hwnd = None
         while time.time() < deadline and hwnd is None:
-            hwnd = find_top_window("AsAccess - RISC-V Assembly IDE", pid, timeout=1.0)
+            hwnd = find_top_window("RISC-Free - RISC-V Assembly IDE", pid, timeout=1.0)
         if hwnd is None:
             raise RuntimeError("main window never appeared")
         step(f"main window hwnd={hwnd}")

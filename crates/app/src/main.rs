@@ -1,4 +1,4 @@
-//! AsAccess GUI: the wxDragon front end wired to the rvasm/rvm core.
+//! RISC-Free GUI: the wxDragon front end wired to the rvasm/rvm core.
 //!
 //! Threading model (docs/TECH-SPEC.md section 8): the UI thread owns all
 //! widgets; a simulation thread owns the Machine exclusively. They talk over
@@ -177,10 +177,10 @@ fn main() {
         let narrator = Rc::new(Narrator::new());
 
         let frame = Frame::builder()
-            .with_title("AsAccess - RISC-V Assembly IDE")
+            .with_title("RISC-Free - RISC-V Assembly IDE")
             .with_size(Size::new(1200, 800))
             .build();
-        frame.set_accessibility_label("AsAccess main window");
+        frame.set_accessibility_label("RISC-Free main window");
         #[cfg(target_os = "windows")]
         frame.set_accessibility_role(AccRole::Application);
 
@@ -935,7 +935,7 @@ fn build_menu_bar() -> MenuBar {
             "Reconnect the speech bridge after starting a screen reader",
         )
         .append_separator()
-        .append_item(ID_EXIT, "E&xit\tAlt+F4", "Exit AsAccess")
+        .append_item(ID_EXIT, "E&xit\tAlt+F4", "Exit RISC-Free")
         .build();
 
     // F-keys follow RARS so course muscle memory keeps working:
@@ -1000,7 +1000,7 @@ fn build_menu_bar() -> MenuBar {
             "Show keyboard shortcuts",
         )
         .append_separator()
-        .append_item(ID_ABOUT, "&About AsAccess", "About this application")
+        .append_item(ID_ABOUT, "&About RISC-Free", "About this application")
         .build();
 
     MenuBar::builder()
@@ -1685,7 +1685,7 @@ fn bind_menu_events(
             ID_SHORTCUTS => show_shortcuts_dialog(&fr),
             ID_ABOUT => w
                 .status_bar
-                .set_status_text("AsAccess: an accessibility-first RISC-V IDE", 0),
+                .set_status_text("RISC-Free: an accessibility-first RISC-V IDE", 0),
             _ => {}
         }
     });

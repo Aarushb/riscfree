@@ -1,4 +1,4 @@
-//! asaccess-cli: headless assembler and simulator. Exit codes: 0 success,
+//! riscfree-cli: headless assembler and simulator. Exit codes: 0 success,
 //! 1 usage error, 2 assembly errors, 3 simulation error.
 
 use rvasm::{AsmConfig, InputFile};
@@ -237,7 +237,7 @@ fn print_halt(halt: &Halt, machine: &Machine) {
 
 fn print_help() {
     println!(
-        "asaccess-cli [options] <file.s> [more.s ...] [-- program args]\n\
+        "riscfree-cli [options] <file.s> [more.s ...] [-- program args]\n\
          options:\n\
            --run         assemble and execute\n\
            --max-steps N stop after N instructions\n\

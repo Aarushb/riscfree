@@ -13,7 +13,7 @@ fn main() {
         Some(mut speaker) => {
             println!("active backend: {}", speaker.backend_name());
             println!("saying a short phrase...");
-            speaker.speak("AsAccess speech probe. Prism is working.", false);
+            speaker.speak("RISC-Free speech probe. Prism is working.", false);
             std::thread::sleep(std::time::Duration::from_millis(2500));
             speaker.speak("Second phrase, interrupting.", true);
             std::thread::sleep(std::time::Duration::from_millis(1500));

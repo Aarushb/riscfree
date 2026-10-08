@@ -1,4 +1,4 @@
-//! rvasm: the AsAccess RISC-V assembler.
+//! rvasm: the RISC-Free RISC-V assembler.
 //!
 //! Assembles RARS-style RISC-V assembly source into a [`Program`]: text
 //! statements with encodings and source spans, a data image, and a symbol

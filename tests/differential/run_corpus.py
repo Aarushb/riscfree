@@ -1,5 +1,5 @@
 """RARS differential harness: run each corpus program through both RARS and
-asaccess-cli and compare observable behavior (stdout, exit path, final
+riscfree-cli and compare observable behavior (stdout, exit path, final
 registers). This is the parity arbiter for ambiguous semantics (see
 docs/COMPAT.md).
 
@@ -16,7 +16,7 @@ import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
-CLI = REPO / "target" / "debug" / "asaccess-cli.exe"
+CLI = REPO / "target" / "debug" / "riscfree-cli.exe"
 CORPUS = Path(__file__).parent / "programs"
 
 

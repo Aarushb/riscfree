@@ -1,6 +1,6 @@
-# Building AsAccess
+# Building RISC-Free
 
-The workspace has two kinds of crates. The core (`rvasm`, `rvm`, `narration`, `asaccess-cli`) is pure Rust: `cargo test` just works. The GUI (`asaccess`) and speech (`speech`) layers wrap native libraries and need the toolchain below on Windows. Everything is project-scoped; nothing installs machine-wide beyond the standard VS Build Tools workload.
+The workspace has two kinds of crates. The core (`rvasm`, `rvm`, `narration`, `riscfree-cli`) is pure Rust: `cargo test` just works. The GUI (`riscfree`) and speech (`speech`) layers wrap native libraries and need the toolchain below on Windows. Everything is project-scoped; nothing installs machine-wide beyond the standard VS Build Tools workload.
 
 ## Prerequisites
 
@@ -44,14 +44,14 @@ A `scripts/dev-env.ps1` may automate this later; for now this file is the source
 The distribution is a plain zip: no installer UI to verify with a screen reader, no admin rights, updates by replacing the files.
 
 ```bash
-cargo build --release -p asaccess -p asaccess-cli
+cargo build --release -p riscfree -p riscfree-cli
 python scripts/package.py
 ```
 
-The zip lands in `target/dist/asaccess-<version>-windows-x64.zip` with the GUI exe, the headless CLI, `prism.dll` (staged beside the binaries by the build), and a `FIRST-RUN.txt` pointing at F1 for shortcuts and the File > Reconnect speech fallback.
+The zip lands in `target/dist/riscfree-<version>-windows-x64.zip` with the GUI exe, the headless CLI, `prism.dll` (staged beside the binaries by the build), and a `FIRST-RUN.txt` pointing at F1 for shortcuts and the File > Reconnect speech fallback.
 
 ## Verifying
 
 - `cargo test` covers the core crates with no special environment.
 - `cargo run -p speech --features prism --example probe` (with the step 3 environment) speaks a test phrase through the active screen reader and prints the backends Prism found.
-- `cargo run -p asaccess` opens the GUI; NVDA and JAWS should read every control.
+- `cargo run -p riscfree` opens the GUI; NVDA and JAWS should read every control.

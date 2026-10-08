@@ -1,4 +1,4 @@
-# AsAccess
+# RISC-Free
 
 An accessibility-first RISC-V assembler, emulator, and IDE for the desktop, built to replace RARS for coursework. Native Windows app, written in Rust.
 
@@ -6,7 +6,7 @@ An accessibility-first RISC-V assembler, emulator, and IDE for the desktop, buil
 
 I am a blind computing science student, and RARS is the simulator my courses actually use for RISC-V (CMPUT 229 for the fellow UAlberta students). It is a simulator wrapped in a Java Swing UI that screen readers can barely navigate, so I built [rars_access](https://github.com/Aarushb/rars_access), a command-line wrapper that makes the common workflows usable. That wrapper carried me through my labs, but it was always a (very limited) workaround at best. I don't even know how it got me through the course. Every pane RARS cannot name, every value I had to compute by hand because a dialog will not read itself, is extra work sighted people never see, and the course is hard enough for them as it is. I was sorta kinda determined to try and build something to fully replace RARS so, eight-some months later...
 
-AsAccess: an IDE where accessibility is part of the architecture rather than retrofitted. It is also an inclusive app, not one "made for the blind". Sighted students get a fast, native desktop app (how long has it been since RARS even got a commit?), and blind and low-vision students get the same app where every register, memory cell, assembler error, and runtime event is reachable from the keyboard and spoken by their screen reader. Same course material, same labs, same seat at the table.
+RISC-Free: an IDE where accessibility is part of the architecture rather than retrofitted. It is also an inclusive app, not one "made for the blind". Sighted students get a fast, native desktop app (how long has it been since RARS even got a commit?), and blind and low-vision students get the same app where every register, memory cell, assembler error, and runtime event is reachable from the keyboard and spoken by their screen reader. Same course material, same labs, same seat at the table.
 
 ## What it does today
 
@@ -31,8 +31,8 @@ This is why it was built, so it gets its own section.
 Building from source needs Rust, Visual Studio Build Tools, and a local Prism build; the exact steps are in [docs/BUILDING.md](docs/BUILDING.md). The short version:
 
 ```bash
-cargo run --release -p asaccess          # the GUI
-cargo run --release -p asaccess-cli -- --run examples/asm/fibonacci.s
+cargo run --release -p riscfree          # the GUI
+cargo run --release -p riscfree-cli -- --run examples/asm/fibonacci.s
 ```
 
 Once built, open any `.s` file, press F3 to assemble and F5 to run. Examples for every subsystem (console I/O, files, interrupts, the bitmap display, compressed instructions) are in `examples/asm/`.

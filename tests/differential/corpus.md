@@ -1,7 +1,7 @@
 # Differential corpus
 
 Each `programs/<name>.s` has a sibling `<name>.expected` holding the exact
-stdout of a correct run through `asaccess-cli --run`. `run_corpus.py` checks
+stdout of a correct run through `riscfree-cli --run`. `run_corpus.py` checks
 our output against it, and — when pointed at a RARS jar with `--rars-jar` —
 also against RARS itself, which is what makes a divergence visible instead of
 a shared bug.

@@ -18,25 +18,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "asaccess"
-version = "0.1.0"
-dependencies = [
- "narration",
- "rvasm",
- "rvm",
- "speech",
- "wxdragon",
-]
-
-[[package]]
-name = "asaccess-cli"
-version = "0.1.0"
-dependencies = [
- "rvasm",
- "rvm",
-]
-
-[[package]]
 name = "atomic-waker"
 version = "1.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -896,6 +877,25 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
+]
+
+[[package]]
+name = "riscfree"
+version = "0.1.0"
+dependencies = [
+ "narration",
+ "rvasm",
+ "rvm",
+ "speech",
+ "wxdragon",
+]
+
+[[package]]
+name = "riscfree-cli"
+version = "0.1.0"
+dependencies = [
+ "rvasm",
+ "rvm",
 ]
 
 [[package]]

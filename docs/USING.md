@@ -1,4 +1,4 @@
-# Using AsAccess
+# Using RISC-Free
 
 A walkthrough of the application for keyboard and screen reader users, and the reference for the command-line interface. The GUI reads the same assembly the CLI does, so you can prototype in either.
 
@@ -70,7 +70,7 @@ The Settings dialog carries: announcement verbosity (Off, Brief, Verbose), instr
 ## Command line
 
 ```text
-asaccess-cli [options] <file.s> [more.s ...] [-- program args]
+riscfree-cli [options] <file.s> [more.s ...] [-- program args]
 
 --run              assemble and execute
 --max-steps N      stop after N instructions

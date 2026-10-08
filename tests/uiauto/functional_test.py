@@ -2,7 +2,7 @@
 GUI with the RARS-conventional F-keys, then verify the Run I/O transcript and
 status bar through the UIA tree.
 
-Usage: python functional_test.py [path-to-asaccess.exe]
+Usage: python functional_test.py [path-to-riscfree.exe]
 """
 
 import sys
@@ -18,8 +18,8 @@ import win32con
 from pywinauto import Application
 
 REPO = Path(__file__).resolve().parents[2]
-EXE = Path(sys.argv[1]) if len(sys.argv) > 1 else REPO / "target" / "debug" / "asaccess.exe"
-TITLE = "AsAccess - RISC-V Assembly IDE"
+EXE = Path(sys.argv[1]) if len(sys.argv) > 1 else REPO / "target" / "debug" / "riscfree.exe"
+TITLE = "RISC-Free - RISC-V Assembly IDE"
 
 steps: list[str] = []
 

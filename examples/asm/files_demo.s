@@ -1,7 +1,7 @@
 # File I/O: write a line to a file, read it back, print it.
     .data
-path:   .asciz "asaccess-demo.txt"
-text:   .asciz "written by AsAccess\n"
+path:   .asciz "riscfree-demo.txt"
+text:   .asciz "written by RISC-Free\n"
 rbuf:   .space 64
     .text
     .globl main

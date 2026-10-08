@@ -8,7 +8,7 @@ import win32con
 import win32gui
 
 REPO = Path(__file__).resolve().parents[2]
-EXE = REPO / "target-spike" / "debug" / "asaccess.exe"
+EXE = REPO / "target-spike" / "debug" / "riscfree.exe"
 VK_F1 = 0x70
 WM_KEYDOWN, WM_KEYUP = 0x0100, 0x0101
 
@@ -31,7 +31,7 @@ try:
     deadline = time.time() + 30
     while time.time() < deadline and hwnd is None:
         time.sleep(0.5)
-        hits = find_by_title("AsAccess")
+        hits = find_by_title("RISC-Free")
         if hits:
             hwnd = hits[0][0]
     assert hwnd, f"main window missing; windows seen: {find_by_title('')[:10]}"

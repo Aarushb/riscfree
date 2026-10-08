@@ -1,6 +1,6 @@
 # Timer interrupt demo: a handler prints a tick each time the timer fires,
 # and exits on the fifth tick. Run with:
-#   asaccess-cli --run --timer 200 examples/asm/interrupt_demo.s
+#   riscfree-cli --run --timer 200 examples/asm/interrupt_demo.s
 # (In the GUI: Tools > Timer Tool, arm at 200, then run.)
     .data
 tick_msg: .asciz "tick\n"

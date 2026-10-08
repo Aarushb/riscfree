@@ -39,5 +39,5 @@ desktop.ini
 /tests/uiauto/uia_dump.txt
 
 # Files the example and corpus programs write when run from the repo root
-/asaccess-demo.txt
+/riscfree-demo.txt
 /corpus_file.txt
