@@ -1,5 +1,11 @@
 # RISC-Free
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Rust: 1.85+](https://img.shields.io/badge/Rust-1.85+-orange.svg?logo=rust&logoColor=white)](https://www.rust-lang.org/)
+[![Platform: Windows x64](https://img.shields.io/badge/Platform-Windows%20x64-brightgreen.svg)]()
+[![Target: RV32 | RV64](https://img.shields.io/badge/ISA-RV32%20%7C%20RV64-informational.svg)]()
+[![Accessibility: 100% UIA Native](https://img.shields.io/badge/Accessibility-100%25%20UIA%20Native-success.svg)]()
+
 An accessibility-first RISC-V assembler, emulator, and IDE for the desktop, built to replace RARS for coursework. Native Windows app, written in Rust.
 
 ## Why this exists
@@ -16,6 +22,39 @@ RISC-Free: an IDE where accessibility is part of the architecture rather than re
 - The tools RARS courses rely on: bitmap display, digital lab sim with the seven-segment displays and hex keypad, float representation, instruction counter, timer tool, and an instruction decoder.
 - A headless CLI for scripting and autograding: assemble, run, dump registers, and emit JSON Lines execution traces for machine-checked grading.
 - A differential corpus of example and test programs, run against RARS itself where RARS can run them, so compatibility is verified rather than assumed.
+
+## Architecture
+
+The diagram below outlines the core execution pipeline and dual accessibility surfaces:
+
+```mermaid
+flowchart TD
+    subgraph SourceCode ["Assembly & Coursework Input"]
+        ASM["RISC-V Source (.s)\nMacros, Directives, Code"]
+    end
+
+    subgraph CoreEngine ["RISC-Free Core (Rust)"]
+        Assembler["Assembler & Parser\nSource Diagnostics (File, Line, Col)"]
+        Emulator["RV32 / RV64 Execution Core\nBase Integer + M, Zicsr, F/D, C"]
+        Debugger["Debugger Engine\nStep, Backstep, Breakpoints, Memcheck"]
+    end
+
+    subgraph Interfaces ["Dual Access Surfaces"]
+        GUI["Native Desktop GUI (wxDragon)\nFull Windows UI Automation Tree"]
+        CLI["Headless CLI (riscfree-cli)\nMachine-checked Grading & JSONL"]
+    end
+
+    subgraph SpeechBridge ["Audio & Assistive Feedback"]
+        Prism["Prism Bridge\nNVDA / JAWS / SAPI Announcements"]
+    end
+
+    ASM --> Assembler
+    Assembler --> Emulator
+    Emulator <--> Debugger
+    Debugger --> GUI
+    Debugger --> CLI
+    GUI --> Prism
+```
 
 ## How accessibility is done
 
