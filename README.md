@@ -6,6 +6,10 @@
 [![Target: RV32 | RV64](https://img.shields.io/badge/ISA-RV32%20%7C%20RV64-informational.svg)]()
 [![Accessibility: 100% UIA Native](https://img.shields.io/badge/Accessibility-100%25%20UIA%20Native-success.svg)]()
 
+<p align="center">
+  <img src="docs/images/screenshot_main.png" alt="RISC-Free desktop IDE showing line-numbered RISC-V assembly source code, toolbar controls for assemble, run, step, and registers inspection pane" width="760">
+</p>
+
 An accessibility-first RISC-V assembler, emulator, and IDE for the desktop, built to replace RARS for coursework. Native Windows app, written in Rust.
 
 ## Why this exists
