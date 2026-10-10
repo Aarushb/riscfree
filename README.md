@@ -50,9 +50,11 @@ Windows first, and in active development. The feature set above is complete and 
 
 The long-term dream, same one I wrote about in rars_access, is that nobody should need a wrapper like mine at all. Accessibility built in from the start is better for everyone, and it is not harder if you decide to do it before the first line of code. (WOE: Write-Once-For-Everyone). This project is my proof of that.
 
-## Contributing
+## Contributing & Feedback
 
 Issues, pull requests, and feedback are all welcome. If you use a screen reader and something in here fights you, that is a bug worth filing even if it seems minor.
+
+If RISC-Free helps you in your coursework, research, or teaching, consider leaving a star on GitHub — it helps other students, educators, and blind developers discover accessible tools for computer architecture.
 
 ## License
 
